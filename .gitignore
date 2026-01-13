@@ -8,3 +8,11 @@ __pycache__/
 .vscode/
 .idea/
 *.log
+# ML models (never commit)
+ml_models/*.pkl
+ml_models/*.joblib
+
+# Local auth/session junk
+cookies.txt
+__pycache__/
+*.pyc
