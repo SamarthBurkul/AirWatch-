@@ -1,15 +1,17 @@
 # ml_handler.py
+import os
 import pickle
-import pandas as pd
-from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+import pandas as pd
 
 # Set up logger basic config if not already configured elsewhere
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
+# Default model features (fallback)
 MODEL_FEATURES = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene']
 
 # Globals populated by load_model()
@@ -17,60 +19,155 @@ AQI_PREDICTOR_MODEL: Optional[Any] = None
 AQI_IMPUTER: Optional[Any] = None
 AQI_MODEL_FEATURES: Optional[list] = None
 
+# Environment-configurable model URL (set MODEL_URL in Render service if you want to override)
+DEFAULT_MODEL_URL = os.environ.get(
+    "MODEL_URL",
+    "https://github.com/SamarthBurkul/AirWatch-/releases/download/v1.0.0/random_forest_model.pkl"
+)
+MODEL_DIR = Path(__file__).resolve().parent / "ml_models"
+MODEL_FILENAME = "random_forest_model.pkl"
+MODEL_PATH = MODEL_DIR / MODEL_FILENAME
+
+
+def _download_file_requests(url: str, dest: Path, timeout: int = 60) -> bool:
+    """
+    Try to download using requests (streamed). Returns True on success.
+    """
+    try:
+        import requests
+    except ImportError:
+        logger.debug("requests not installed; falling back to urllib.")
+        return False
+
+    try:
+        logger.info("Downloading ML model from %s to %s", url, dest)
+        # download to a temp file first
+        tmp_path = dest.with_suffix(".tmp")
+        with requests.get(url, stream=True, timeout=timeout) as r:
+            r.raise_for_status()
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        tmp_path.replace(dest)
+        logger.info("Model downloaded to %s", dest)
+        return True
+    except Exception as e:
+        logger.exception("Failed to download model via requests: %s", e)
+        return False
+
+
+def _download_file_urllib(url: str, dest: Path, timeout: int = 60) -> bool:
+    """
+    Fallback download using urllib.request. Returns True on success.
+    """
+    try:
+        import urllib.request
+    except Exception as e:
+        logger.debug("urllib not available: %s", e)
+        return False
+
+    try:
+        logger.info("Downloading ML model (urllib) from %s to %s", url, dest)
+        tmp_path = dest.with_suffix(".tmp")
+        urllib.request.urlretrieve(url, tmp_path)
+        tmp_path.replace(dest)
+        logger.info("Model downloaded to %s (urllib)", dest)
+        return True
+    except Exception as e:
+        logger.exception("Failed to download model via urllib: %s", e)
+        return False
+
+
+def ensure_model_file(path: Path = MODEL_PATH, url: str = DEFAULT_MODEL_URL) -> bool:
+    """
+    Ensure the model file exists at `path`. If missing, try to download it.
+    Returns True if file exists after the call.
+    """
+    try:
+        if path.exists() and path.is_file():
+            logger.debug("Model file already exists: %s", path)
+            return True
+
+        # create directory
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Try requests first, then urllib fallback
+        if _download_file_requests(url, path):
+            return True
+        if _download_file_urllib(url, path):
+            return True
+
+        logger.error("Failed to download model from %s. File does not exist at %s", url, path)
+        return False
+    except Exception as e:
+        logger.exception("Unexpected error in ensure_model_file: %s", e)
+        return False
+
 
 def load_model(path: Optional[str] = None) -> None:
     """
     Load the trained model package saved by train_random_forest.py.
+
     The training script saves a dict with keys: 'model', 'imputer', 'features'.
     This loader is backward-compatible with older pickles that contain a plain model object.
     """
     global AQI_PREDICTOR_MODEL, AQI_IMPUTER, AQI_MODEL_FEATURES
 
+    # Resolve path (priority: function arg -> MODEL_PATH)
     if path is None:
-        # Resolve path relative to this file: ../ml_models/random_forest_model.pkl or ./ml_models/...
-        path = Path(__file__).resolve().parent / 'ml_models' / 'random_forest_model.pkl'
+        path_obj = MODEL_PATH
     else:
-        path = Path(path)
+        path_obj = Path(path)
 
+    # If file missing, attempt download
+    if not path_obj.exists():
+        logger.warning("Model path %s does not exist; attempting to download from %s", path_obj, DEFAULT_MODEL_URL)
+        ok = ensure_model_file(path_obj, DEFAULT_MODEL_URL)
+        if not ok:
+            logger.error("❌ Error: Model file is not available at %s and download failed.", path_obj)
+            AQI_PREDICTOR_MODEL = None
+            AQI_IMPUTER = None
+            AQI_MODEL_FEATURES = MODEL_FEATURES
+            return
+
+    # Try loading
     try:
-        with open(path, 'rb') as f:
+        with open(path_obj, "rb") as f:
             pkg = pickle.load(f)
 
-        # If the pickle is a dictionary with model+imputer, unpack it
         if isinstance(pkg, dict):
-            AQI_PREDICTOR_MODEL = pkg.get('model')
-            AQI_IMPUTER = pkg.get('imputer')
-            AQI_MODEL_FEATURES = pkg.get('features', MODEL_FEATURES)
-            logger.info("✅ AQI Predictor package loaded from %s (model + imputer).", path)
+            AQI_PREDICTOR_MODEL = pkg.get("model")
+            AQI_IMPUTER = pkg.get("imputer")
+            AQI_MODEL_FEATURES = pkg.get("features", MODEL_FEATURES)
+            logger.info("✅ AQI Predictor package loaded from %s (model + imputer).", path_obj)
         else:
-            # Backwards compatibility: plain model object
             AQI_PREDICTOR_MODEL = pkg
             AQI_IMPUTER = None
             AQI_MODEL_FEATURES = MODEL_FEATURES
-            logger.info("✅ AQI Predictor model (plain object) loaded from %s.", path)
+            logger.info("✅ AQI Predictor model (plain object) loaded from %s.", path_obj)
 
-        # Validate feature list
         if AQI_MODEL_FEATURES is None:
             AQI_MODEL_FEATURES = MODEL_FEATURES
-        logger.debug("Model expects features (order): %s", AQI_MODEL_FEATURES)
+        logger.debug("Model feature list: %s", AQI_MODEL_FEATURES)
 
     except FileNotFoundError:
-        logger.error("❌ Error: %s not found. AQI predictor will not work.", path)
+        logger.error("❌ Error: %s not found. AQI predictor will not work.", path_obj)
         AQI_PREDICTOR_MODEL = None
         AQI_IMPUTER = None
         AQI_MODEL_FEATURES = MODEL_FEATURES
     except Exception as e:
-        logger.exception("❌ Error loading %s: %s", path, e)
+        logger.exception("❌ Error loading model at %s: %s", path_obj, e)
         AQI_PREDICTOR_MODEL = None
         AQI_IMPUTER = None
         AQI_MODEL_FEATURES = MODEL_FEATURES
 
 
-# Auto-load at import-time (keeps previous behaviour but with robust path resolution)
+# Auto-load at import-time (keeps previous behaviour but ensures model gets downloaded if missing)
 try:
     load_model()
 except Exception:
-    # load_model already logs detailed error
+    # load_model logs errors already
     pass
 
 
@@ -134,11 +231,9 @@ def predict_current_aqi(data: Dict[str, Any]) -> Optional[float]:
             logger.error("Prediction failed: Invalid features: %s", invalid_features)
             return None
 
-        # Build DataFrame in the exact feature order used during training
         input_df = pd.DataFrame(input_values, columns=AQI_MODEL_FEATURES)
         logger.debug("Input DataFrame for prediction:\n%s", input_df)
 
-        # If imputer available, apply it
         if AQI_IMPUTER is not None:
             try:
                 transformed = AQI_IMPUTER.transform(input_df)
@@ -147,7 +242,6 @@ def predict_current_aqi(data: Dict[str, Any]) -> Optional[float]:
                 logger.exception("Error applying imputer to input: %s", e)
                 return None
         else:
-            # If no imputer available, ensure no NaNs remain
             if input_df.isna().any().any():
                 logger.error("Prediction failed: missing input values and no imputer available.")
                 return None
