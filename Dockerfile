@@ -1,43 +1,46 @@
-# Dockerfile — production-ready for your app
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=off
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# System libs
+# System libs needed for some Python wheels / compiling C/Fortran extensions
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl build-essential gcc g++ libatlas-base-dev \
+ && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    gfortran \
+    libopenblas-dev \
+    liblapack-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip tooling
+# upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Install numpy & scipy first (wheels)
-RUN python -m pip install numpy==1.24.3 scipy==1.10.1
+# install numpy & scipy first (ensures wheels)
+RUN pip install numpy==1.24.3 scipy==1.10.1
 
-# Copy requirements (caching layer)
+# copy requirements
 COPY requirements.txt .
 
-# Install the rest
-RUN python -m pip install -r requirements.txt
+# install rest
+RUN pip install -r requirements.txt
 
-# Copy source
+# copy project
 COPY . .
 
-# Allow passing model URL at build-time; if provided, download model
-ARG AQI_MODEL_URL=""
-RUN mkdir -p ml_models \
- && if [ -n "$AQI_MODEL_URL" ]; then \
-      echo "Downloading model from $AQI_MODEL_URL" && \
-      curl -fSL "$AQI_MODEL_URL" -o ml_models/random_forest_model.pkl || (echo "Model download failed" && exit 1); \
-    else \
-      echo "No AQI_MODEL_URL provided — expecting ml_models/random_forest_model.pkl in repo"; \
-    fi
+# ensure model folder
+RUN mkdir -p ml_models
+
+# download model from GitHub Release (uses AQI_MODEL_URL env on Render)
+ARG AQI_MODEL_URL=https://github.com/SamarthBurkul/AirWatch-/releases/download/v1.1.0/random_forest_model.pkl
+RUN if [ -n "$AQI_MODEL_URL" ]; then curl -L "$AQI_MODEL_URL" -o ml_models/random_forest_model.pkl || true; fi
 
 EXPOSE 5000
 
-# Use wsgi:app if your entrypoint module is wsgi.py with `app = create_app()` or replace as needed
-CMD ["gunicorn", "wsgi:app", "--bind", "0.0.0.0:5000", "--workers", "3", "--timeout", "120"]
+CMD ["gunicorn", "wsgi:app", "--bind", "0.0.0.0:5000", "--timeout", "120"]
