@@ -1,0 +1,12 @@
+venv/
+venv_test/
+__pycache__/
+.git
+*.pyc
+instance/
+.env
+.vscode/
+.idea/
+*.log
+ml_models/*.pkl
+random_forest_model.pkl

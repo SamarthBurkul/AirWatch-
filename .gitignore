@@ -1,21 +1,27 @@
+# Virtualenvs
 venv/
-.env
-instance/airwatch.db
-ml_models/random_forest_model.pkl
-random_forest_model.pkl
+venv_test/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# Local DB / instance
+instance/
+instance/airwatch.db
+
+# Editor / IDE
 .vscode/
 .idea/
-*.log
-# ML models (never commit)
-ml_models/*.pkl
-ml_models/*.joblib
 
-# Local auth/session junk
+# Logs
+*.log
+
+# ML model binaries (do not commit)
+ml_models/*.pkl
+random_forest_model.pkl
+
+# local env
+.env
 cookies.txt
-__pycache__/
-*.pyc
-"venv_test/" 
-"venv_test/" 
-"venv_test/" 
