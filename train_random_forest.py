@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Train RandomForestRegressor for AQI prediction and save as pickle.
+Train RandomForestRegressor for AQI prediction and save as compressed joblib.
 
-Usage examples:
-    python train_random_forest.py --csv data/city_day.csv
-    python train_random_forest.py --csv data/city_day.csv --impute mean --test-size 0.2
+Usage:
+    python train_random_forest.py --csv data/city_day.csv --n-estimators 80 --max-depth 12
 """
 
-import os
 import argparse
 import logging
-import pickle
+import joblib  # More efficient than pickle for large numpy-based models
 from pathlib import Path
 
 import numpy as np
@@ -21,187 +19,126 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 # -----------------------------------------------------------------------------
-# Configuration: required feature list and default parameters
+# Configuration
 # -----------------------------------------------------------------------------
 MODEL_FEATURES = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3',
                   'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene']
-TARGET_COLUMN = 'AQI'  # target column name in CSV
-
-DEFAULT_N_ESTIMATORS = 200
+TARGET_COLUMN = 'AQI'
+DEFAULT_N_ESTIMATORS = 80
 RANDOM_STATE = 42
 
-# -----------------------------------------------------------------------------
-# Setup logging
-# -----------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger("train_rf")
 
-# -----------------------------------------------------------------------------
-# Helper functions
-# -----------------------------------------------------------------------------
 def validate_and_prepare_df(df: pd.DataFrame):
-    """
-    Ensure required columns exist, reorder features, and return X (DataFrame) and y (Series).
-    Missing feature columns that do not exist will be created filled with NaN so imputer can handle them.
-    """
-    # Ensure all feature columns exist in DataFrame; if not, create them with NaN
+    """Ensures feature alignment and prepares X, y."""
     for f in MODEL_FEATURES:
         if f not in df.columns:
-            logger.warning("Feature '%s' not found in CSV. Creating column filled with NaN.", f)
+            logger.warning("Feature '%s' not found. Filling with NaN.", f)
             df[f] = np.nan
 
-    # Ensure target exists
     if TARGET_COLUMN not in df.columns:
-        raise ValueError(f"Target column '{TARGET_COLUMN}' not found in CSV.")
+        raise ValueError(f"Target column '{TARGET_COLUMN}' not found.")
 
-    # Drop rows with missing target
     df = df.dropna(subset=[TARGET_COLUMN]).copy()
-    if df.shape[0] == 0:
-        raise ValueError("No rows remain after dropping rows without the target column.")
-
-    # Reorder X to required feature order and ensure dtype numeric
-    X = df[MODEL_FEATURES].copy()
-    # Try converting all feature columns to numeric (coerce errors to NaN)
-    X = X.apply(pd.to_numeric, errors='coerce')
-
-    # Target numeric
+    X = df[MODEL_FEATURES].apply(pd.to_numeric, errors='coerce')
     y = pd.to_numeric(df[TARGET_COLUMN], errors='coerce')
-    # Drop rows where target could not be parsed
+    
     mask = ~y.isna()
-    X = X.loc[mask, :]
-    y = y.loc[mask]
+    return X.loc[mask, :], y.loc[mask]
 
-    return X, y
-
-# -----------------------------------------------------------------------------
-# Training pipeline
-# -----------------------------------------------------------------------------
 def train_and_save(csv_path: str,
                    output_dir: str = 'ml_models',
                    impute_strategy: str = 'median',
                    test_size: float = 0.2,
                    n_estimators: int = DEFAULT_N_ESTIMATORS,
+                   max_depth: int = None,
+                   max_features: str = 'sqrt',
+                   min_samples_leaf: int = 1,
                    random_state: int = RANDOM_STATE):
+    
     csv_path = Path(csv_path)
     if not csv_path.exists():
-        raise FileNotFoundError(f"CSV dataset not found at: {csv_path}")
+        raise FileNotFoundError(f"CSV not found at: {csv_path}")
 
     logger.info("Loading data from: %s", csv_path)
     df = pd.read_csv(csv_path)
-    logger.info("CSV loaded. Rows: %d, Columns: %d", df.shape[0], df.shape[1])
-
-    # Prepare X, y with required features and target
     X, y = validate_and_prepare_df(df)
-    logger.info("Prepared features X shape: %s and target y shape: %s", X.shape, y.shape)
 
-    # Split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state
-    )
-    logger.info("Train split: %d rows, Test split: %d rows", X_train.shape[0], X_test.shape[0])
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
 
-    # Impute missing values (on training set then apply to test)
-    logger.info("Imputing missing values using strategy: %s", impute_strategy)
+    logger.info("Imputing with strategy: %s", impute_strategy)
     imputer = SimpleImputer(strategy=impute_strategy)
-    X_train_imputed = pd.DataFrame(
-        imputer.fit_transform(X_train),
-        columns=MODEL_FEATURES,
-        index=X_train.index
-    )
-    X_test_imputed = pd.DataFrame(
-        imputer.transform(X_test),
-        columns=MODEL_FEATURES,
-        index=X_test.index
-    )
+    X_train_imputed = pd.DataFrame(imputer.fit_transform(X_train), columns=MODEL_FEATURES, index=X_train.index)
+    X_test_imputed = pd.DataFrame(imputer.transform(X_test), columns=MODEL_FEATURES, index=X_test.index)
 
-    # Instantiate and train RandomForestRegressor
-    logger.info("Training RandomForestRegressor (n_estimators=%d, random_state=%d)...",
-                n_estimators, random_state)
+    logger.info("Training RF (estimators=%d, max_depth=%s, max_features=%s)...", 
+                n_estimators, max_depth, max_features)
+    
+    # Using n_jobs=1 for memory stability; change to -1 for faster local training
     rf = RandomForestRegressor(
         n_estimators=n_estimators,
+        max_depth=max_depth,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
         random_state=random_state,
-        n_jobs=-1
+        n_jobs=1
     )
     rf.fit(X_train_imputed, y_train)
 
-    # Compute performance metrics on test set
     y_pred = rf.predict(X_test_imputed)
-    r2 = r2_score(y_test, y_pred)
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    logger.info("Evaluation on test set: R2=%.4f, MAE=%.4f, MSE=%.4f", r2, mae, mse)
+    logger.info("Evaluation: R2=%.4f, MAE=%.4f", r2_score(y_test, y_pred), mean_absolute_error(y_test, y_pred))
 
-    # Ensure output directory exists
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save both the model and the imputer together so downstream code can apply same imputation if necessary.
-    # We'll save a simple dictionary with keys: 'model', 'imputer', 'features' for convenience.
-    packaged = {
-        'model': rf,
-        'imputer': imputer,
-        'features': MODEL_FEATURES
-    }
+    packaged = {'model': rf, 'imputer': imputer, 'features': MODEL_FEATURES}
 
-    out_path1 = out_dir / 'random_forest_model.pkl'        # ml_models/random_forest_model.pkl
-    out_path2 = Path.cwd() / 'random_forest_model.pkl'     # random_forest_model.pkl at repo root
+    out_path1 = out_dir / 'random_forest_model.pkl'
+    out_path2 = Path.cwd() / 'random_forest_model.pkl'
 
-    logger.info("Saving trained model to: %s and %s", out_path1, out_path2)
-    with open(out_path1, 'wb') as f:
-        pickle.dump(packaged, f)
-    with open(out_path2, 'wb') as f:
-        pickle.dump(packaged, f)
+    # joblib.dump with compression (level 3) significantly reduces file size
+    logger.info("Saving compressed model to %s", out_path1)
+    joblib.dump(packaged, out_path1, compress=3)
+    joblib.dump(packaged, out_path2, compress=3)
 
-    logger.info("Model saved successfully.")
+    # Calculate and report file size in MB
+    s1_mb = out_path1.stat().st_size / (1024 * 1024)
+    logger.info("Final Model Size: %.2f MB", s1_mb)
 
-    # Quick check: load back and test a sample prediction (zeros)
-    with open(out_path1, 'rb') as f:
-        loaded = pickle.load(f)
-    model_loaded = loaded['model']
-    imputer_loaded = loaded['imputer']
-    # Example sample: zeros or small values; must be same columns order
-    sample = pd.DataFrame([np.zeros(len(MODEL_FEATURES))], columns=MODEL_FEATURES)
-    sample_imputed = pd.DataFrame(imputer_loaded.transform(sample), columns=MODEL_FEATURES)
-    pred_sample = model_loaded.predict(sample_imputed)[0]
-    logger.info("Sanity check prediction for zero-sample: %.4f", float(pred_sample))
+    return {'model_paths': [str(out_path1), str(out_path2)], 'size_mb': s1_mb}
 
-    # Return paths and metrics
-    return {
-        'model_paths': [str(out_path1), str(out_path2)],
-        'metrics': {'r2': float(r2), 'mae': float(mae), 'mse': float(mse)},
-        'n_train': int(X_train.shape[0]),
-        'n_test': int(X_test.shape[0])
-    }
-
-# -----------------------------------------------------------------------------
-# CLI
-# -----------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Train RandomForest for AQI prediction.")
-    parser.add_argument('--csv', required=True, help='Path to dataset CSV (e.g., data/city_day.csv)')
-    parser.add_argument('--output-dir', default='ml_models', help='Directory to save trained model')
-    parser.add_argument('--impute', choices=['mean', 'median'], default='median', help='Imputation strategy')
-    parser.add_argument('--test-size', type=float, default=0.2, help='Test split proportion')
-    parser.add_argument('--n-estimators', type=int, default=DEFAULT_N_ESTIMATORS, help='RandomForest n_estimators')
-    parser.add_argument('--random-state', type=int, default=RANDOM_STATE, help='Random state for reproducibility')
+    parser = argparse.ArgumentParser(description="Train AQI Prediction Model")
+    parser.add_argument('--csv', required=True, help="Path to input CSV")
+    parser.add_argument('--output-dir', default='ml_models', help="Output folder")
+    parser.add_argument('--impute', choices=['mean', 'median'], default='median', help="Missing value strategy")
+    parser.add_argument('--test-size', type=float, default=0.2, help="Test set fraction")
+    parser.add_argument('--n-estimators', type=int, default=DEFAULT_N_ESTIMATORS, help="Number of trees")
+    parser.add_argument('--max-depth', type=int, default=None, help="Max depth of each tree (control size)")
+    parser.add_argument('--max-features', type=str, default='sqrt', help="Features per split (sqrt is memory efficient)")
+    parser.add_argument('--min-samples-leaf', type=int, default=1, help="Min samples per leaf node")
+    parser.add_argument('--random-state', type=int, default=RANDOM_STATE)
 
     args = parser.parse_args()
+    
+    # Handle numeric vs string for max_features if needed (argparse passes as string)
     try:
-        result = train_and_save(
-            csv_path=args.csv,
-            output_dir=args.output_dir,
-            impute_strategy=args.impute,
-            test_size=args.test_size,
-            n_estimators=args.n_estimators,
-            random_state=args.random_state
-        )
-        logger.info("Training complete. Results: %s", result)
-    except Exception as exc:
-        logger.exception("Training failed: %s", exc)
-        raise
+        max_feat = int(args.max_features)
+    except ValueError:
+        max_feat = args.max_features
+
+    train_and_save(
+        csv_path=args.csv, 
+        output_dir=args.output_dir, 
+        impute_strategy=args.impute, 
+        test_size=args.test_size, 
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        max_features=max_feat,
+        min_samples_leaf=args.min_samples_leaf,
+        random_state=args.random_state
+    )
 
 if __name__ == '__main__':
     main()

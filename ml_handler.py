@@ -1,229 +1,283 @@
-# ml_handler.py
+"""
+ml_handler.py
+
+Lightweight ML model loader and prediction helpers for AirWatch.
+
+Expect the model file to be a joblib dump of a dict:
+{
+  'model': RandomForestRegressor,
+  'imputer': SimpleImputer,
+  'features': ['PM2.5', 'PM10', ...]
+}
+
+This module:
+- Attempts runtime download of the model file if AQI_MODEL_URL is provided.
+- Loads the model with joblib and attempts memory-map mode where possible.
+- Exposes:
+    load_model_if_needed(now: bool=False) -> bool
+    background_model_loader(delay_seconds: int = 1) -> threading.Thread
+    predict_current_aqi(input_data: dict) -> Optional[float]
+    get_aqi_category(aqi_value) -> dict
+    calculate_all_subindices(input_data: dict) -> dict
+"""
+
 import os
-import pickle
+import time
+import threading
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional, Dict
 
-# NOTE: keep imports minimal at module import time to reduce startup memory.
-# Heavy libs (joblib, pandas) are imported lazily inside functions.
+import joblib
+import numpy as np
+import pandas as pd
+import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ml_handler")
+logger.setLevel(logging.INFO)
 
-MODEL_FEATURES = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene']
+# Configuration from environment
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "ml_models"))
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-# Global placeholders; model will be loaded lazily by load_model_if_needed()
-AQI_PREDICTOR_MODEL: Optional[Any] = None
-AQI_IMPUTER: Optional[Any] = None
-AQI_MODEL_FEATURES: Optional[list] = None
-
-DEFAULT_MODEL_URL = os.environ.get(
-    "AQI_MODEL_URL",
-    "https://github.com/SamarthBurkul/AirWatch-/releases/download/v1.1.0/random_forest_model.pkl"
-)
-MODEL_DIR = Path(__file__).resolve().parent / "ml_models"
-MODEL_FILENAME = "random_forest_model.pkl"
+MODEL_FILENAME = os.environ.get("MODEL_FILENAME", "random_forest_model.pkl")
 MODEL_PATH = MODEL_DIR / MODEL_FILENAME
 
+# Public URL to a model artifact (GitHub release, S3, etc.). If provided, module
+# will attempt to download the model file at runtime when missing.
+AQI_MODEL_URL = os.environ.get("AQI_MODEL_URL", "").strip()
 
-def _download_file_requests(url: str, dest: Path, timeout: int = 60) -> bool:
+# Internal state
+_loaded_package: Optional[dict] = None
+_load_lock = threading.Lock()
+_last_load_time = 0.0
+
+
+def _download_model_from_url(url: str, target_path: Path, timeout: int = 60) -> bool:
+    """Download file to target_path. Returns True on success."""
     try:
-        import requests
-    except Exception:
-        return False
-    try:
-        logger.info("Downloading ML model from %s to %s", url, dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(".tmp")
-        with requests.get(url, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        tmp.replace(dest)
-        logger.info("Model downloaded to %s", dest)
+        logger.info("Downloading model from %s to %s", url, target_path)
+        resp = requests.get(url, stream=True, timeout=timeout)
+        resp.raise_for_status()
+        tmp = target_path.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        tmp.replace(target_path)
+        logger.info("Model downloaded successfully to %s", target_path)
         return True
-    except Exception as e:
-        logger.exception("requests download failed: %s", e)
+    except Exception as exc:
+        logger.exception("Failed to download model from %s: %s", url, exc)
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
         return False
 
 
-def ensure_model_file(path: Path = MODEL_PATH, url: str = DEFAULT_MODEL_URL) -> bool:
-    """Ensure the model file exists; if not attempt to download it. Return True if file exists."""
+def _load_from_disk(path: Path):
+    """Load the packaged model dict from disk using joblib (try mmap first)."""
     try:
-        if path.exists() and path.is_file():
-            logger.debug("Model file present at %s", path)
-            return True
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if _download_file_requests(url, path):
-            return True
-        logger.error("Failed to obtain model file from %s", url)
-        return False
-    except Exception as e:
-        logger.exception("Unexpected error ensuring model file: %s", e)
-        return False
-
-
-def _load_with_joblib(path: Path):
-    """Try joblib.load with memory-mapping for large numpy arrays."""
-    try:
-        import joblib
         logger.info("Attempting joblib.load(..., mmap_mode='r') for %s", path)
-        loaded = joblib.load(path, mmap_mode='r')  # memory-map large arrays
-        return loaded
-    except Exception as e:
-        logger.debug("joblib load failed: %s", e)
+        try:
+            pkg = joblib.load(path, mmap_mode='r')
+        except TypeError:
+            # Older joblib versions may not accept mmap_mode on certain objects
+            pkg = joblib.load(path)
+        except Exception as e_mmap:
+            # If mmap fails (sometimes for certain pickles), try a normal load
+            logger.warning("mmap_mode load failed: %s — will retry normal joblib.load", e_mmap)
+            pkg = joblib.load(path)
+        # Basic validation
+        if not isinstance(pkg, dict) or 'model' not in pkg:
+            logger.error("Loaded package does not contain 'model' key; invalid package.")
+            return None
+        return pkg
+    except Exception as exc:
+        logger.exception("Error loading model from disk: %s", exc)
         return None
 
 
-def _load_with_pickle(path: Path):
-    """Fallback pickle loader (may use more memory)."""
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    except Exception as e:
-        logger.exception("pickle load failed: %s", e)
-        return None
-
-
-def load_model_if_needed(path: Optional[Path] = None) -> bool:
+def load_model_if_needed(now: bool = False) -> bool:
     """
-    Ensure model globals are populated. This is called lazily when prediction is requested.
-    Returns True if model is ready.
+    Ensure model is loaded.
+    - If already loaded, returns True.
+    - If not, attempts to load. If now=True, blocks until loaded (useful for synchronous predict).
+    - If AQI_MODEL_URL provided and local file missing or obviously corrupted, attempt download.
     """
-    global AQI_PREDICTOR_MODEL, AQI_IMPUTER, AQI_MODEL_FEATURES
+    global _loaded_package, _last_load_time
 
-    if AQI_PREDICTOR_MODEL is not None:
+    if _loaded_package is not None:
         return True
 
-    path = path or MODEL_PATH
-    if not path.exists():
-        logger.info("Model not found locally; attempting download from %s", DEFAULT_MODEL_URL)
-        if not ensure_model_file(path, DEFAULT_MODEL_URL):
-            logger.error("Model file unavailable and download failed.")
-            return False
-
-    # Try joblib mmap load first (very memory efficient for large numpy arrays).
-    loaded = _load_with_joblib(path)
-    if loaded is None:
-        # fallback to pickle
-        loaded = _load_with_pickle(path)
-        if loaded is None:
-            logger.error("All model loading attempts failed.")
-            return False
-
-    # loaded may be a dict (model + imputer + features) or a plain model object
-    if isinstance(loaded, dict):
-        AQI_PREDICTOR_MODEL = loaded.get("model") or loaded.get("estimator") or None
-        AQI_IMPUTER = loaded.get("imputer")
-        AQI_MODEL_FEATURES = loaded.get("features") or MODEL_FEATURES
-        logger.info("Loaded model package from %s (dict)", path)
-    else:
-        AQI_PREDICTOR_MODEL = loaded
-        AQI_IMPUTER = None
-        AQI_MODEL_FEATURES = MODEL_FEATURES
-        logger.info("Loaded plain model object from %s", path)
-
-    if AQI_MODEL_FEATURES is None:
-        AQI_MODEL_FEATURES = MODEL_FEATURES
-
-    return AQI_PREDICTOR_MODEL is not None
-
-
-def get_aqi_category(aqi: float) -> Dict[str, str]:
-    try:
-        aqi_val = float(aqi)
-    except (ValueError, TypeError):
-        aqi_val = None
-    if aqi_val is None:
-        return {"category": "N/A", "description": "AQI data invalid.", "color_class": "bg-slate-500/20 text-slate-300 border-slate-500", "chartColor": "#64748b"}
-    if aqi_val <= 50:
-        return {"category": "Good", "description": "Minimal impact.", "color_class": "bg-green-500/20 text-green-300 border-green-500", "chartColor": "#34d399"}
-    if aqi_val <= 100:
-        return {"category": "Satisfactory", "description": "Minor breathing discomfort.", "color_class": "bg-yellow-500/20 text-yellow-300 border-yellow-500", "chartColor": "#f59e0b"}
-    if aqi_val <= 200:
-        return {"category": "Moderate", "description": "Breathing discomfort to sensitive groups.", "color_class": "bg-orange-500/20 text-orange-300 border-orange-500", "chartColor": "#f97316"}
-    if aqi_val <= 300:
-        return {"category": "Poor", "description": "Breathing discomfort to most people.", "color_class": "bg-red-500/20 text-red-300 border-red-500", "chartColor": "#ef4444"}
-    if aqi_val <= 400:
-        return {"category": "Very Poor", "description": "Respiratory illness on prolonged exposure.", "color_class": "bg-purple-500/20 text-purple-300 border-purple-500", "chartColor": "#a855f7"}
-    return {"category": "Severe", "description": "Serious health effects.", "color_class": "bg-rose-800/20 text-rose-400 border-rose-700", "chartColor": "#be123c"}
-
-
-def predict_current_aqi(data: Dict[str, Any]) -> Optional[float]:
-    """Lazy-load model on first prediction and predict. Uses pandas locally only inside this function."""
-    global AQI_PREDICTOR_MODEL, AQI_IMPUTER, AQI_MODEL_FEATURES
-
-    # Ensure model is loaded (lazy)
-    ok = load_model_if_needed()
-    if not ok:
-        logger.error("Model not available for prediction.")
-        return None
+    # Acquire lock; if caller doesn't want to wait and another thread is loading, return False
+    acquired = _load_lock.acquire(blocking=now)
+    if not acquired:
+        logger.debug("Model load already in progress by another thread; returning False (non-blocking).")
+        return False
 
     try:
-        import pandas as pd  # local import reduces startup memory
-    except Exception as e:
-        logger.exception("pandas not available: %s", e)
-        return None
+        # double-check inside lock
+        if _loaded_package is not None:
+            return True
 
-    if AQI_MODEL_FEATURES is None:
-        AQI_MODEL_FEATURES = MODEL_FEATURES
+        # If local file missing or zero-sized, try download (if URL present)
+        if (not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 10) and AQI_MODEL_URL:
+            ok = _download_model_from_url(AQI_MODEL_URL, MODEL_PATH)
+            if not ok:
+                logger.warning("Could not download model from AQI_MODEL_URL (%s). Will try to load local file if present.", AQI_MODEL_URL)
 
-    # Build input DataFrame in the required order
-    input_values = {}
-    missing, invalid = [], []
-    for feat in AQI_MODEL_FEATURES:
-        if feat not in data:
-            missing.append(feat)
-            continue
+        # Try to load package from disk
+        if MODEL_PATH.exists():
+            pkg = _load_from_disk(MODEL_PATH)
+            if pkg is None:
+                logger.warning("Model package invalid or could not be loaded from disk (%s).", MODEL_PATH)
+                return False
+
+            # Basic validation
+            missing_keys = [k for k in ('model', 'imputer', 'features') if k not in pkg]
+            if missing_keys:
+                logger.error("Model package missing required keys: %s", missing_keys)
+                return False
+
+            _loaded_package = pkg
+            _last_load_time = time.time()
+            logger.info("Model loaded successfully and ready (path=%s).", MODEL_PATH)
+            return True
+        else:
+            logger.warning("Model file not present at %s and AQI_MODEL_URL not provided or download failed.", MODEL_PATH)
+            return False
+    finally:
+        _load_lock.release()
+
+
+def background_model_loader(delay_seconds: int = 1):
+    """
+    Start a background thread to load the model after delay_seconds. Non-blocking.
+    Useful during app startup.
+    """
+    def _job():
+        time.sleep(delay_seconds)
         try:
-            input_values[feat] = [float(data[feat])]
+            load_model_if_needed(now=True)
         except Exception:
-            invalid.append(feat)
+            logger.exception("Background model loader failed.")
 
-    if missing:
-        logger.error("Missing features for prediction: %s", missing)
-        return None
-    if invalid:
-        logger.error("Invalid numeric values for features: %s", invalid)
+    t = threading.Thread(target=_job, daemon=True)
+    t.start()
+    logger.info("Background model loader scheduled to start after %s seconds.", delay_seconds)
+    return t
+
+
+def predict_current_aqi(input_data: dict) -> Optional[float]:
+    """
+    Predict AQI from an input mapping pollutant -> numeric value (strings convertible to float).
+    Returns predicted AQI (float) or None on failure.
+    This will attempt to load the model synchronously if it is not loaded.
+    """
+    if not load_model_if_needed(now=True):
+        logger.error("Model is not loaded; cannot predict.")
         return None
 
-    input_df = pd.DataFrame(input_values, columns=AQI_MODEL_FEATURES)
+    pkg = _loaded_package
+    if not pkg:
+        logger.error("Internal: _loaded_package is empty after load.")
+        return None
+
+    model = pkg.get('model')
+    imputer = pkg.get('imputer')
+    features = pkg.get('features')
+
+    if model is None or imputer is None or features is None:
+        logger.error("Model package missing keys (model/imputer/features).")
+        return None
 
     try:
-        if AQI_IMPUTER is not None:
-            input_df = pd.DataFrame(AQI_IMPUTER.transform(input_df), columns=AQI_MODEL_FEATURES)
-        elif input_df.isna().any().any():
-            logger.error("Missing values and no imputer available.")
-            return None
-
-        pred = AQI_PREDICTOR_MODEL.predict(input_df)
-        predicted = round(float(pred[0]), 2)
-        logger.info("Predicted AQI: %s", predicted)
-        return predicted
-    except Exception as e:
-        logger.exception("Prediction error: %s", e)
+        # Create a single-row DataFrame in the required order
+        row = {f: input_data.get(f, None) for f in features}
+        df = pd.DataFrame([row], columns=features)
+        df = df.apply(pd.to_numeric, errors='coerce')
+        X = pd.DataFrame(imputer.transform(df), columns=features)
+        pred = model.predict(X)[0]
+        return float(np.round(float(pred), 4))
+    except Exception as exc:
+        logger.exception("Prediction failed: %s", exc)
         return None
 
 
-# Sub-index functions (unchanged)
-def get_pm25_subindex(x): ...
-def get_pm10_subindex(x): ...
-def get_so2_subindex(x): ...
-def get_nox_subindex(x): ...
-def get_nh3_subindex(x): ...
-def get_co_subindex(x): ...
-def get_o3_subindex(x): ...
+def get_aqi_category(aqi_value) -> Dict[str, str]:
+    """Return frontend-friendly category mapping (text color, chart color, etc.)."""
+    try:
+        aqi_val = float(aqi_value)
+    except Exception:
+        aqi_val = None
 
-def calculate_all_subindices(data: Dict[str, Any]) -> Dict[str, float]:
-    subindices = {}
-    subindices['PM2.5'] = get_pm25_subindex(data.get('PM2.5'))
-    subindices['PM10'] = get_pm10_subindex(data.get('PM10'))
-    subindices['SO2'] = get_so2_subindex(data.get('SO2'))
-    subindices['NOx'] = get_nox_subindex(data.get('NOx'))
-    subindices['NH3'] = get_nh3_subindex(data.get('NH3'))
-    subindices['CO'] = get_co_subindex(data.get('CO'))
-    subindices['O3'] = get_o3_subindex(data.get('O3'))
-    return {k: round(v, 1) for k, v in subindices.items() if v is not None and v > 0}
+    if aqi_val is None:
+        return {"category": "N/A", "description": "AQI data invalid.", "textColor": "text-slate-400", "borderColor": "border-slate-500", "bgColor": "bg-slate-500/10", "chartColor": "#64748b"}
+    if aqi_val <= 50:
+        return {"category": "Good", "description": "Minimal impact.", "textColor": "text-green-400", "borderColor": "border-green-500", "bgColor": "bg-green-500/20", "chartColor": "#34d399"}
+    if aqi_val <= 100:
+        return {"category": "Satisfactory", "description": "Minor breathing discomfort.", "textColor": "text-yellow-400", "borderColor": "border-yellow-500", "bgColor": "bg-yellow-500/20", "chartColor": "#f59e0b"}
+    if aqi_val <= 200:
+        return {"category": "Moderate", "description": "Breathing discomfort to sensitive groups.", "textColor": "text-orange-400", "borderColor": "border-orange-500", "bgColor": "bg-orange-500/20", "chartColor": "#f97316"}
+    if aqi_val <= 300:
+        return {"category": "Poor", "description": "Breathing discomfort to most people.", "textColor": "text-red-400", "borderColor": "border-red-500", "bgColor": "bg-red-500/20", "chartColor": "#ef4444"}
+    if aqi_val <= 400:
+        return {"category": "Very Poor", "description": "Respiratory illness on prolonged exposure.", "textColor": "text-purple-400", "borderColor": "border-purple-500", "bgColor": "bg-purple-500/20", "chartColor": "#a855f7"}
+    return {"category": "Severe", "description": "Serious health effects.", "textColor": "text-rose-700", "borderColor": "border-rose-700", "bgColor": "bg-rose-800/20", "chartColor": "#be123c"}
+
+
+def calculate_all_subindices(input_data: dict) -> Dict[str, float]:
+    """
+    Create a pollutant contribution breakdown.
+    If model.feature_importances_ present, allocate predicted AQI by importance.
+    Otherwise fallback to proportional split of positive input values.
+    """
+    # If model is not loaded, try quickly to load; if failed return empty
+    if not load_model_if_needed(now=False):
+        return {}
+
+    try:
+        pkg = _loaded_package
+        model = pkg.get('model')
+        features = pkg.get('features')
+        predicted = predict_current_aqi(input_data)
+        if predicted is None:
+            return {}
+
+        fi = getattr(model, "feature_importances_", None)
+        if fi is None or len(fi) != len(features):
+            # fallback proportional to positive inputs
+            values = []
+            total = 0.0
+            for f in features:
+                try:
+                    v = float(input_data.get(f) or 0.0)
+                except Exception:
+                    v = 0.0
+                v = max(0.0, v)
+                values.append(v)
+                total += v
+            contributions = {}
+            if total <= 0:
+                per = round(predicted / len(features), 2)
+                for f in features:
+                    contributions[f] = per
+            else:
+                for f, v in zip(features, values):
+                    contributions[f] = round(predicted * (v / total), 2)
+            return contributions
+
+        fi = np.array(fi, dtype=float)
+        s = fi.sum()
+        if s <= 0:
+            fi_norm = np.ones_like(fi) / len(fi)
+        else:
+            fi_norm = fi / s
+        contributions = {features[i]: round(float(predicted * fi_norm[i]), 2) for i in range(len(features))}
+        return contributions
+    except Exception as exc:
+        logger.exception("Failed to calculate subindices: %s", exc)
+        return {}
