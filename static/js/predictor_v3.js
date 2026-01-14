@@ -1,13 +1,47 @@
-// static/js/predictor_v3.js
+// predictor_v3.js - updated for robust JSON handling and safe fallbacks
 document.addEventListener('DOMContentLoaded', () => {
-    // --- Get Elements (Initialization) ---
+
+    // ------------------------
+    // 1) EARLY FALLBACKS (MUST come first)
+    // ------------------------
+    // Provide a safe global getAqiCategoryInfo so charts/plugins can call it immediately.
+    if (typeof window.getAqiCategoryInfo === 'undefined') {
+        window.getAqiCategoryInfo = function(aqi) {
+            // Normalize input
+            const a = (aqi === null || aqi === undefined || isNaN(Number(aqi))) ? -1 : Number(aqi);
+            // Conservative mapping used by UI (textColor, borderColor, bgColor, chartColor)
+            if (a <= 50 && a >= 0) {
+                return { category: "Good", description: "Minimal impact.", textColor: "text-green-400", borderColor: "border-green-500", bgColor: "bg-green-500/20", chartColor: "#34d399" };
+            }
+            if (a <= 100) { return { category: "Satisfactory", description: "Minor breathing discomfort.", textColor: "text-yellow-400", borderColor: "border-yellow-500", bgColor: "bg-yellow-500/20", chartColor: "#f59e0b" }; }
+            if (a <= 200) { return { category: "Moderate", description: "Breathing discomfort to sensitive groups.", textColor: "text-orange-400", borderColor: "border-orange-500", bgColor: "bg-orange-500/20", chartColor: "#f97316" }; }
+            if (a <= 300) { return { category: "Poor", description: "Breathing discomfort to most people.", textColor: "text-red-400", borderColor: "border-red-500", bgColor: "bg-red-500/20", chartColor: "#ef4444" }; }
+            if (a <= 400) { return { category: "Very Poor", description: "Respiratory illness on prolonged exposure.", textColor: "text-purple-400", borderColor: "border-purple-500", bgColor: "bg-purple-500/20", chartColor: "#a855f7" }; }
+            if (a > 400) { return { category: "Severe", description: "Serious health effects.", textColor: "text-rose-700", borderColor: "border-rose-700", bgColor: "bg-rose-800/20", chartColor: "#be123c" }; }
+            return { category: "N/A", description: "", textColor: "text-slate-400", borderColor: "border-slate-500", bgColor: "bg-slate-500/10", chartColor: "#64748b" };
+        };
+    }
+    // Provide showToast fallback if main app toast isn't loaded
+    if (typeof window.showToast === 'undefined') {
+        window.showToast = function(message, isError = false) {
+            // Non-blocking by default — console log + optional alert for dev
+            if (isError) console.error('[Toast]', message);
+            else console.log('[Toast]', message);
+            // Uncomment below to show a blocking alert during dev:
+            // alert((isError ? 'ERROR: ' : '') + message);
+        };
+    }
+
+    // ------------------------
+    // 2) DOM ELEMENTS
+    // ------------------------
     const predictForm = document.getElementById('predict-form');
-    const predictionResultArea = document.getElementById('prediction-result-area'); // Container for all results
-    const predictionResultText = document.getElementById('prediction-result'); // Text part
+    const predictionResultArea = document.getElementById('prediction-result-area');
+    const predictionResultText = document.getElementById('prediction-result');
     const predictBtn = predictForm ? predictForm.querySelector('button[type="submit"]') : null;
     const predictBtnText = document.getElementById('predict-btn-text');
     const predictSpinner = document.getElementById('predict-spinner');
-    const useCurrentDataBtn = document.getElementById('use-current-data-btn'); // Geolocation fill button
+    const useCurrentDataBtn = document.getElementById('use-current-data-btn');
     const geolocateIcon = document.getElementById('geolocate-icon');
     const geolocateSpinner = document.getElementById('geolocate-spinner');
     const geolocateText = document.getElementById('geolocate-text');
@@ -16,46 +50,53 @@ document.addEventListener('DOMContentLoaded', () => {
     let resultGaugeChart = null;
     let contributionChart = null;
 
-    // --- Chart Plugin Setup (Re-used from Dashboard) ---
+    // ------------------------
+    // 3) Gauge text plugin (safe register)
+    // ------------------------
     const gaugeTextPlugin = {
         id: 'gaugeText',
         beforeDraw: (chart) => {
-            // Draws AQI value and 'AQI' text inside the doughnut chart
-            if (chart.config.type !== 'doughnut' || chart.canvas.id !== 'resultGaugeChart') return;
+            if (chart.config.type !== 'doughnut' || !chart.canvas || chart.canvas.id !== 'resultGaugeChart') return;
             const { ctx, width, height } = chart;
             const aqi = chart.config.data.datasets?.[0]?.data?.[0];
             if (aqi === undefined || aqi === null) return;
-            const categoryInfo = getAqiCategoryInfo(aqi);
+            // Use the safe global helper
+            const categoryInfo = (typeof getAqiCategoryInfo === 'function') ? getAqiCategoryInfo(aqi) : window.getAqiCategoryInfo(aqi);
             ctx.restore();
-            const fontSizeTitle = (height / 114).toFixed(2); const fontSizeCategory = (height / 220).toFixed(2);
-            const colorMap = {'text-green-400':'#34d399','text-yellow-400':'#f59e0b','text-orange-400':'#f97316','text-red-400':'#ef4444','text-purple-400':'#a855f7','text-rose-700':'#be123c','text-slate-400':'#9ca3af'};
-            ctx.font = `bold ${fontSizeTitle}rem Poppins, sans-serif`; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+            const fontSizeTitle = (height / 114).toFixed(2);
+            const fontSizeCategory = (height / 220).toFixed(2);
+            const colorMap = {
+                'text-green-400': '#34d399', 'text-yellow-400': '#f59e0b', 'text-orange-400': '#f97316',
+                'text-red-400': '#ef4444', 'text-purple-400': '#a855f7', 'text-rose-700': '#be123c', 'text-slate-400': '#9ca3af'
+            };
+            ctx.font = `bold ${fontSizeTitle}rem Poppins, sans-serif`;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
             ctx.fillStyle = colorMap[categoryInfo.textColor] || '#9ca3af';
             ctx.fillText(aqi, width / 2, height / 2 - 10);
-            ctx.font = `600 ${fontSizeCategory}rem Poppins, sans-serif`; ctx.fillStyle = '#9ca3af';
+            ctx.font = `600 ${fontSizeCategory}rem Poppins, sans-serif`;
+            ctx.fillStyle = '#9ca3af';
             ctx.fillText("AQI", width / 2, height / 2 + 20);
             ctx.save();
         }
     };
-    // Register plugin safely
     if (typeof Chart !== 'undefined' && Chart.register) {
-         try { Chart.register(gaugeTextPlugin); } catch (e) { console.warn("Could not register gaugeText plugin.", e); }
+        try { Chart.register(gaugeTextPlugin); } catch (e) { console.warn('Could not register gaugeText plugin', e); }
     }
 
-
-    // --- Chart Drawing Functions ---
-
+    // ------------------------
+    // 4) CHART DRAW FUNCTIONS
+    // ------------------------
     function drawResultGauge(aqiValue) {
-        // Draws the circular AQI gauge chart (Doughnut chart)
         const gaugeCtx = document.getElementById('resultGaugeChart')?.getContext('2d');
         if (!gaugeCtx) { console.error("Result Gauge Chart canvas not found."); return; }
-        if (resultGaugeChart) resultGaugeChart.destroy(); // Destroy previous instance
+        if (resultGaugeChart) resultGaugeChart.destroy();
 
         let displayAqi = 0;
-        let categoryInfo = getAqiCategoryInfo(-1);
-        if (aqiValue !== null && aqiValue !== undefined && !isNaN(aqiValue)){
+        let categoryInfo = window.getAqiCategoryInfo(-1);
+        if (aqiValue !== null && aqiValue !== undefined && !isNaN(aqiValue)) {
             displayAqi = parseInt(aqiValue);
-            categoryInfo = getAqiCategoryInfo(displayAqi);
+            categoryInfo = window.getAqiCategoryInfo(displayAqi);
         }
 
         resultGaugeChart = new Chart(gaugeCtx, {
@@ -63,7 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
             data: {
                 datasets: [{
                     data: [displayAqi, Math.max(0, 500 - displayAqi)],
-                    backgroundColor: [categoryInfo.chartColor, 'rgba(255, 255, 255, 0.1)'],
+                    backgroundColor: [categoryInfo.chartColor || '#64748b', 'rgba(255, 255, 255, 0.1)'],
                     borderWidth: 0, cutout: '80%'
                 }]
             },
@@ -72,216 +113,212 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function drawContributionChart(subindices) {
-        // Draws the bar chart showing contribution of each pollutant (Sub-Index)
         const contribCtx = document.getElementById('contributionChart')?.getContext('2d');
         if (!contribCtx) { console.error("Contribution Chart canvas not found."); return; }
-        if (contributionChart) contributionChart.destroy(); // Destroy previous instance
+        if (contributionChart) contributionChart.destroy();
 
-        // Filter out zero/null/undefined and sort subindices for charting
         const chartData = Object.entries(subindices || {})
-                              .filter(([key, value]) => value && value > 0)
-                              .sort(([, a], [, b]) => b - a); // Sort descending by value
+            .filter(([k, v]) => v !== null && v !== undefined && !isNaN(v) && Number(v) > 0)
+            .sort(([, a], [, b]) => b - a);
 
-        if (chartData.length === 0) { 
-            console.log("No contributing subindices found to draw chart."); 
-            // Display a message on the canvas if no contribution is detected
-            contribCtx.clearRect(0,0, contribCtx.canvas.width, contribCtx.canvas.height);
-            contribCtx.fillStyle = '#9ca3af'; contribCtx.textAlign = 'center';
+        if (chartData.length === 0) {
+            contribCtx.clearRect(0, 0, contribCtx.canvas.width, contribCtx.canvas.height);
+            contribCtx.fillStyle = '#9ca3af';
+            contribCtx.textAlign = 'center';
             contribCtx.fillText('No significant pollutant contribution detected', contribCtx.canvas.width / 2, contribCtx.canvas.height / 2);
             return;
         }
 
-        const labels = chartData.map(([key]) => key); // Pollutant names (e.g., PM2.5, O3)
-        const values = chartData.map(([, value]) => value); // Sub-index values
-
+        const labels = chartData.map(([k]) => k);
+        const values = chartData.map(([, v]) => v);
         const backgroundColors = ['#38bdf8', '#8b5cf6', '#f97316', '#ef4444', '#eab308', '#22c55e', '#6366f1'].slice(0, labels.length);
 
         contributionChart = new Chart(contribCtx, {
-            type: 'bar', // Vertical bars
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Sub-Index Value',
-                    data: values,
-                    backgroundColor: backgroundColors,
-                    borderColor: backgroundColors,
-                    borderWidth: 1
-                }]
-            },
+            type: 'bar',
+            data: { labels: labels, datasets: [{ label: 'Sub-Index Value', data: values, backgroundColor: backgroundColors, borderColor: backgroundColors, borderWidth: 1 }] },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false }, title: { display: false } },
-                scales: {
-                    y: { title: { display: true, text: 'Calculated Sub-Index' }, beginAtZero: true } // Y-axis is value
-                }
+                scales: { y: { title: { display: true, text: 'Calculated Sub-Index' }, beginAtZero: true } }
             }
         });
     }
 
-    // --- Geolocation and Data Filling ---
+    // ------------------------
+    // 5) GEOLOCATION & PRE-FILL
+    // ------------------------
     async function fillWithCurrentData() {
-        // Fetches current pollutants using Geolocation and fills the form inputs
         if (!navigator.geolocation) { showToast("Geolocation is not supported by this browser.", true); return; }
 
-        // Set button to loading state
         if (!useCurrentDataBtn || !geolocateIcon || !geolocateSpinner || !geolocateText) { console.error("Geolocation button elements missing."); return; }
         useCurrentDataBtn.disabled = true; geolocateIcon.classList.add('hidden');
         geolocateSpinner.classList.remove('hidden'); geolocateText.textContent = 'Getting Location...';
 
         try {
-            // 1. Get coordinates
             const position = await new Promise((resolve, reject) => {
-                navigator.geolocation.getCurrentPosition(resolve, reject, {
-                    timeout: 8000, enableHighAccuracy: false, maximumAge: 300000 // 5 min cache
-                 });
+                navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000, enableHighAccuracy: false, maximumAge: 300000 });
             });
             const lat = position.coords.latitude; const lon = position.coords.longitude;
             geolocateText.textContent = 'Fetching Pollutants...'; console.log(`Geolocation acquired: ${lat}, ${lon}`);
 
-            // 2. Fetch pollutant data from backend
-            // NOTE: The URL must be /api/current_pollutants (Flask strict_slashes=False should fix path issues)
-            const response = await fetch(`/api/current_pollutants?lat=${lat}&lon=${lon}`); 
-            if (!response.ok) { 
+            const response = await fetch(`/api/current_pollutants?lat=${lat}&lon=${lon}`);
+            if (!response.ok) {
                 let errorMsg = `Failed to fetch pollutant data: ${response.statusText}`;
-                try { const errorData = await response.json(); if (errorData.error) errorMsg = errorData.error; } catch(e){}
+                try { const errorData = await response.json(); if (errorData.error) errorMsg = errorData.error; } catch (e) {}
                 throw new Error(errorMsg);
             }
             const data = await response.json();
-
-            if (data.error) throw new Error(data.error); // Handle errors returned in JSON body
+            if (data.error) throw new Error(data.error);
 
             console.log("Fetched current pollutant data:", data);
 
-            // 3. Fill the form fields
             const featuresToFill = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene'];
             let filledCount = 0;
             featuresToFill.forEach(feature => {
-                const input = predictForm.elements[feature]; // Access form elements by name
+                const input = predictForm.elements[feature];
                 if (input) {
                     const value = data[feature];
-                    if (value === null || value === undefined) {
-                        input.value = ''; // Leave blank if data is null/missing
+                    if (value === null || value === undefined || value === '') {
+                        input.value = '';
                     } else {
-                         // Attempt to format, fallback to raw value if not a number
-                         try {
-                             input.value = parseFloat(value).toFixed(2);
-                             filledCount++;
-                         } catch (e) {
-                             input.value = value; // Keep original if not parsable
-                         }
+                        try {
+                            input.value = Number(value).toFixed(2);
+                            filledCount++;
+                        } catch (e) {
+                            input.value = value;
+                        }
                     }
-                    input.style.borderColor = ''; // Clear error styling
+                    input.style.borderColor = '';
                 }
             });
 
-            if (filledCount > 0) {
-                 showToast('Form filled with available location data. Some fields (e.g., NOx, Organics) may be unavailable from this source.');
-            } else {
-                 showToast('Could not fetch any pollutant data to fill the form for your location.', true);
-            }
+            if (filledCount > 0) showToast('Form filled with available location data. Some fields may be unavailable.', false);
+            else showToast('Could not fetch pollutant data for your location.', true);
 
         } catch (error) {
             console.error("Error getting current data:", error);
-            // Provide more specific error messages
             let userMessage = `Error: ${error.message}`;
             if (error.code === 1) userMessage = "Geolocation permission denied.";
             else if (error.code === 2) userMessage = "Could not determine location (position unavailable).";
             else if (error.code === 3) userMessage = "Geolocation request timed out.";
             showToast(userMessage, true);
         } finally {
-            // Reset button state
             useCurrentDataBtn.disabled = false;
             geolocateIcon.classList.remove('hidden');
             geolocateSpinner.classList.add('hidden');
             geolocateText.textContent = 'Use My Location Data';
         }
     }
+    if (useCurrentDataBtn) useCurrentDataBtn.addEventListener('click', fillWithCurrentData);
 
-    // Attach listener to the geolocation button
-    if (useCurrentDataBtn) {
-        useCurrentDataBtn.addEventListener('click', fillWithCurrentData);
-    }
+    // ------------------------
+    // 6) PREDICT FORM SUBMISSION (with robust JSON handling)
+    // ------------------------
+    if (predictForm && predictBtn && predictionResultArea) {
 
-    // --- Current AQI Prediction Form Submission Logic ---
-    if (predictForm && predictBtn && predictionResultArea) { // Simplified element check
-        
         predictForm.addEventListener('submit', async (e) => {
-            e.preventDefault(); // Prevent default page reload
+            e.preventDefault();
             console.log("Predict form submitted.");
 
-            // 1. Validation (Check if all required fields are filled)
+            // Basic validation
             let isValid = true;
             const requiredInputs = predictForm.querySelectorAll('input[type="number"][required]');
             requiredInputs.forEach((input) => {
-                if (!input || typeof input.value === 'undefined' || !input.value.trim()) {
+                if (!input || typeof input.value === 'undefined' || !String(input.value).trim()) {
                     isValid = false;
-                    if(input) input.style.borderColor = 'red';
+                    if (input) input.style.borderColor = 'red';
                 } else {
-                    if(input) input.style.borderColor = '';
+                    if (input) input.style.borderColor = '';
                 }
             });
             if (!isValid) { showToast('Please fill all fields with valid numbers.', true); return; }
-            
-            // 2. UI state: loading
-            predictBtn.disabled = true; predictBtnText.classList.add('hidden');
-            predictSpinner.classList.remove('hidden'); predictionResultArea.classList.add('hidden');
+
+            // UI loading state
+            predictBtn.disabled = true; if (predictBtnText) predictBtnText.classList.add('hidden');
+            if (predictSpinner) predictSpinner.classList.remove('hidden'); if (predictionResultArea) predictionResultArea.classList.add('hidden');
 
             try {
-                // 3. Collect data and send to Flask API for prediction
+                // Gather form data
                 const formData = new FormData(predictForm); const dataObject = {};
                 const features = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene'];
                 features.forEach(feature => { dataObject[feature] = formData.get(feature); });
 
-                const response = await fetch('/api/predict_aqi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dataObject) });
-                const data = await response.json();
-                if (!response.ok || !data.success) { throw new Error(data.error || 'Prediction request failed.'); }
+                // POST to server
+                const response = await fetch('/api/predict_aqi', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(dataObject)
+                });
 
-                // 4. Draw Results (Gauge and Contribution Chart)
+                // Robust parsing: read text first to handle empty/non-JSON bodies
+                const text = await response.text();
+                let parsed;
+                try {
+                    parsed = text ? JSON.parse(text) : null;
+                } catch (err) {
+                    console.error('Invalid JSON from /api/predict_aqi:', text);
+                    throw new Error(parsed?.error || parsed?.detail || text || `Request failed with status ${response.status}`);
+                }
+
+                if (!response.ok || !parsed || !parsed.success) {
+                    const errMsg = (parsed && (parsed.error || parsed.detail)) || `Request failed with status ${response.status}`;
+                    throw new Error(errMsg);
+                }
+
+                const data = parsed;
+
+                // Map server category_info to UI-friendly keys (backwards-compatible)
+                const sc = data.category_info || {};
+                const categoryInfo = {
+                    category: sc.category || 'N/A',
+                    description: sc.description || sc.desc || '',
+                    textColor: sc.textColor || (sc.color_class ? extractTextColorFromClass(sc.color_class) : 'text-slate-400'),
+                    borderColor: sc.borderColor || sc.color_class || 'border-slate-500',
+                    bgColor: sc.bgColor || 'bg-slate-500/10',
+                    chartColor: sc.chartColor || '#64748b'
+                };
+
+                // Update result area UI
                 const aqi = data.predicted_aqi;
-                const categoryInfo = data.category_info;
-                const subindices = data.subindices;
-
-                // Update text summary
                 predictionResultText.innerHTML = `<span class="text-2xl font-semibold ${categoryInfo.textColor}">${categoryInfo.category}</span><br><span class="text-sm text-slate-400">${categoryInfo.description}</span>`;
                 predictionResultText.className = `mt-4 text-center p-4 rounded-lg border-t-4 ${categoryInfo.borderColor} ${categoryInfo.bgColor}`;
 
+                // Draw charts
                 drawResultGauge(aqi);
-                drawContributionChart(subindices);
+                drawContributionChart(data.subindices || {});
 
-                predictionResultArea.classList.remove('hidden'); // Show results area
-                console.log("Prediction successful:", data);
+                predictionResultArea.classList.remove('hidden');
+                console.log('Prediction successful:', data);
 
             } catch (error) {
-                 console.error("Prediction submit error:", error);
-                 // Display error message and destroy charts
-                 predictionResultText.textContent = `Error: ${error.message}`;
-                 predictionResultText.className = 'mt-4 text-center p-4 rounded-lg border-l-4 bg-red-500/20 text-red-300 border-red-500';
-                 predictionResultArea.classList.remove('hidden');
-                 if (resultGaugeChart) resultGaugeChart.destroy(); resultGaugeChart = null;
-                 if (contributionChart) contributionChart.destroy(); contributionChart = null;
-
+                console.error('Prediction submit error:', error);
+                // Show nice error message to user
+                predictionResultText.textContent = `Error: ${error.message || 'Unknown error'}`;
+                predictionResultText.className = 'mt-4 text-center p-4 rounded-lg border-l-4 bg-red-500/20 text-red-300 border-red-500';
+                predictionResultArea.classList.remove('hidden');
+                if (resultGaugeChart) { try { resultGaugeChart.destroy(); } catch (e) {} resultGaugeChart = null; }
+                if (contributionChart) { try { contributionChart.destroy(); } catch (e) {} contributionChart = null; }
             } finally {
-                 // 5. Final state reset
-                 predictBtn.disabled = false; predictBtnText.classList.remove('hidden');
-                 predictSpinner.classList.add('hidden');
+                predictBtn.disabled = false;
+                if (predictBtnText) predictBtnText.classList.remove('hidden');
+                if (predictSpinner) predictSpinner.classList.add('hidden');
             }
-        }); // End prediction event listener
-
+        });
     } else {
-         console.warn("Could not initialize prediction form listener. Check HTML IDs:", {
-             predictForm: !!predictForm, predictBtn: !!predictBtn, predictBtnText: !!predictBtnText,
-             predictSpinner: !!predictSpinner, predictionResultText: !!predictionResultText, predictionResultArea: !!predictionResultArea
-         });
+        console.warn("Could not initialize prediction form listener. Check HTML IDs:", {
+            predictForm: !!predictForm, predictBtn: !!predictBtn, predictBtnText: !!predictBtnText,
+            predictSpinner: !!predictSpinner, predictionResultText: !!predictionResultText, predictionResultArea: !!predictionResultArea
+        });
     }
 
-    // Fallback checks to ensure required global functions are present
-    if (typeof getAqiCategoryInfo === 'undefined') {
-        console.error('getAqiCategoryInfo function is not defined.');
-        window.getAqiCategoryInfo = (aqi) => ({ category: 'N/A', description: '', textColor: 'text-slate-400', borderColor: 'border-slate-500', bgColor: 'bg-slate-500/10', chartColor: '#64748b' });
-    }
-    if (typeof showToast === 'undefined') {
-        console.warn('showToast function is not defined. Ensure main.js is loaded.');
-        window.showToast = (message, isError = false) => { alert(`Toast (${isError ? 'Error' : 'Info'}): ${message}`); };
+    // ------------------------
+    // 7) Small helpers
+    // ------------------------
+    function extractTextColorFromClass(colorClass) {
+        // colorClass might be something like "bg-red-500/20 text-red-300 border-red-500"
+        if (!colorClass || typeof colorClass !== 'string') return 'text-slate-400';
+        const m = colorClass.match(/text-[-\w]+/);
+        return m ? m[0] : 'text-slate-400';
     }
 
-}); // End DOMContentLoaded
+}); // end DOMContentLoaded
