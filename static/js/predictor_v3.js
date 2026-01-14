@@ -1,40 +1,6 @@
-// predictor_v3.js - updated for robust JSON handling and safe fallbacks
+// static/js/predictor_v3.js  (FULL UPDATED FILE)
 document.addEventListener('DOMContentLoaded', () => {
-
-    // ------------------------
-    // 1) EARLY FALLBACKS (MUST come first)
-    // ------------------------
-    // Provide a safe global getAqiCategoryInfo so charts/plugins can call it immediately.
-    if (typeof window.getAqiCategoryInfo === 'undefined') {
-        window.getAqiCategoryInfo = function(aqi) {
-            // Normalize input
-            const a = (aqi === null || aqi === undefined || isNaN(Number(aqi))) ? -1 : Number(aqi);
-            // Conservative mapping used by UI (textColor, borderColor, bgColor, chartColor)
-            if (a <= 50 && a >= 0) {
-                return { category: "Good", description: "Minimal impact.", textColor: "text-green-400", borderColor: "border-green-500", bgColor: "bg-green-500/20", chartColor: "#34d399" };
-            }
-            if (a <= 100) { return { category: "Satisfactory", description: "Minor breathing discomfort.", textColor: "text-yellow-400", borderColor: "border-yellow-500", bgColor: "bg-yellow-500/20", chartColor: "#f59e0b" }; }
-            if (a <= 200) { return { category: "Moderate", description: "Breathing discomfort to sensitive groups.", textColor: "text-orange-400", borderColor: "border-orange-500", bgColor: "bg-orange-500/20", chartColor: "#f97316" }; }
-            if (a <= 300) { return { category: "Poor", description: "Breathing discomfort to most people.", textColor: "text-red-400", borderColor: "border-red-500", bgColor: "bg-red-500/20", chartColor: "#ef4444" }; }
-            if (a <= 400) { return { category: "Very Poor", description: "Respiratory illness on prolonged exposure.", textColor: "text-purple-400", borderColor: "border-purple-500", bgColor: "bg-purple-500/20", chartColor: "#a855f7" }; }
-            if (a > 400) { return { category: "Severe", description: "Serious health effects.", textColor: "text-rose-700", borderColor: "border-rose-700", bgColor: "bg-rose-800/20", chartColor: "#be123c" }; }
-            return { category: "N/A", description: "", textColor: "text-slate-400", borderColor: "border-slate-500", bgColor: "bg-slate-500/10", chartColor: "#64748b" };
-        };
-    }
-    // Provide showToast fallback if main app toast isn't loaded
-    if (typeof window.showToast === 'undefined') {
-        window.showToast = function(message, isError = false) {
-            // Non-blocking by default — console log + optional alert for dev
-            if (isError) console.error('[Toast]', message);
-            else console.log('[Toast]', message);
-            // Uncomment below to show a blocking alert during dev:
-            // alert((isError ? 'ERROR: ' : '') + message);
-        };
-    }
-
-    // ------------------------
-    // 2) DOM ELEMENTS
-    // ------------------------
+    // --- Elements ---
     const predictForm = document.getElementById('predict-form');
     const predictionResultArea = document.getElementById('prediction-result-area');
     const predictionResultText = document.getElementById('prediction-result');
@@ -46,28 +12,63 @@ document.addEventListener('DOMContentLoaded', () => {
     const geolocateSpinner = document.getElementById('geolocate-spinner');
     const geolocateText = document.getElementById('geolocate-text');
 
-    // Chart instances
     let resultGaugeChart = null;
     let contributionChart = null;
 
-    // ------------------------
-    // 3) Gauge text plugin (safe register)
-    // ------------------------
+    // --- Provide a robust getAqiCategoryInfo implementation (prevents undefined errors) ---
+    // This mirrors the shape the backend returns (textColor, borderColor, bgColor, chartColor)
+    function getAqiCategoryInfo(aqi) {
+        let aqiVal = Number(aqi);
+        if (Number.isNaN(aqiVal)) aqiVal = null;
+
+        if (aqiVal === null) {
+            return {
+                category: 'N/A',
+                description: 'AQI data invalid.',
+                textColor: 'text-slate-400',
+                borderColor: 'border-slate-500',
+                bgColor: 'bg-slate-500/10',
+                chartColor: '#64748b'
+            };
+        }
+        if (aqiVal <= 50) {
+            return { category: 'Good', description: 'Minimal impact.', textColor: 'text-green-400', borderColor: 'border-green-500', bgColor: 'bg-green-500/20', chartColor: '#34d399' };
+        }
+        if (aqiVal <= 100) {
+            return { category: 'Satisfactory', description: 'Minor breathing discomfort.', textColor: 'text-yellow-400', borderColor: 'border-yellow-500', bgColor: 'bg-yellow-500/20', chartColor: '#f59e0b' };
+        }
+        if (aqiVal <= 200) {
+            return { category: 'Moderate', description: 'Breathing discomfort to sensitive groups.', textColor: 'text-orange-400', borderColor: 'border-orange-500', bgColor: 'bg-orange-500/20', chartColor: '#f97316' };
+        }
+        if (aqiVal <= 300) {
+            return { category: 'Poor', description: 'Breathing discomfort to most people.', textColor: 'text-red-400', borderColor: 'border-red-500', bgColor: 'bg-red-500/20', chartColor: '#ef4444' };
+        }
+        if (aqiVal <= 400) {
+            return { category: 'Very Poor', description: 'Respiratory illness on prolonged exposure.', textColor: 'text-purple-400', borderColor: 'border-purple-500', bgColor: 'bg-purple-500/20', chartColor: '#a855f7' };
+        }
+        return { category: 'Severe', description: 'Serious health effects.', textColor: 'text-rose-700', borderColor: 'border-rose-700', bgColor: 'bg-rose-800/20', chartColor: '#be123c' };
+    }
+
+    // --- Chart plugin safe registration (uses getAqiCategoryInfo above) ---
     const gaugeTextPlugin = {
         id: 'gaugeText',
         beforeDraw: (chart) => {
-            if (chart.config.type !== 'doughnut' || !chart.canvas || chart.canvas.id !== 'resultGaugeChart') return;
+            if (chart.config.type !== 'doughnut' || chart.canvas.id !== 'resultGaugeChart') return;
             const { ctx, width, height } = chart;
             const aqi = chart.config.data.datasets?.[0]?.data?.[0];
             if (aqi === undefined || aqi === null) return;
-            // Use the safe global helper
-            const categoryInfo = (typeof getAqiCategoryInfo === 'function') ? getAqiCategoryInfo(aqi) : window.getAqiCategoryInfo(aqi);
+            const categoryInfo = getAqiCategoryInfo(aqi);
             ctx.restore();
             const fontSizeTitle = (height / 114).toFixed(2);
             const fontSizeCategory = (height / 220).toFixed(2);
             const colorMap = {
-                'text-green-400': '#34d399', 'text-yellow-400': '#f59e0b', 'text-orange-400': '#f97316',
-                'text-red-400': '#ef4444', 'text-purple-400': '#a855f7', 'text-rose-700': '#be123c', 'text-slate-400': '#9ca3af'
+                'text-green-400': '#34d399',
+                'text-yellow-400': '#f59e0b',
+                'text-orange-400': '#f97316',
+                'text-red-400': '#ef4444',
+                'text-purple-400': '#a855f7',
+                'text-rose-700': '#be123c',
+                'text-slate-400': '#9ca3af'
             };
             ctx.font = `bold ${fontSizeTitle}rem Poppins, sans-serif`;
             ctx.textBaseline = 'middle';
@@ -80,23 +81,44 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.save();
         }
     };
+
     if (typeof Chart !== 'undefined' && Chart.register) {
-        try { Chart.register(gaugeTextPlugin); } catch (e) { console.warn('Could not register gaugeText plugin', e); }
+        try { Chart.register(gaugeTextPlugin); } catch (e) { console.warn("Could not register gaugeText plugin.", e); }
     }
 
-    // ------------------------
-    // 4) CHART DRAW FUNCTIONS
-    // ------------------------
+    // --- Utility: safe JSON parsing to avoid "Unexpected end of JSON input" ---
+    async function safeParseJsonResponse(response) {
+        // Reads the response text and attempts parse; returns object {parsed, error, rawText}
+        const ct = response.headers ? (response.headers.get('content-type') || '') : '';
+        const text = await response.text();
+        if (!text || text.trim().length === 0) {
+            return { parsed: null, error: `Empty response (status ${response.status})`, rawText: '' };
+        }
+        // Prefer JSON.parse when it looks like JSON
+        const looksLikeJson = ct.includes('application/json') || text.trim().startsWith('{') || text.trim().startsWith('[');
+        if (looksLikeJson) {
+            try {
+                const parsed = JSON.parse(text);
+                return { parsed, error: null, rawText: text };
+            } catch (err) {
+                return { parsed: null, error: 'Invalid JSON received from server', rawText: text };
+            }
+        }
+        // Non-JSON but non-empty
+        return { parsed: null, error: `Unexpected content-type (${ct || 'unknown'})`, rawText: text };
+    }
+
+    // --- Chart draw helpers ---
     function drawResultGauge(aqiValue) {
         const gaugeCtx = document.getElementById('resultGaugeChart')?.getContext('2d');
         if (!gaugeCtx) { console.error("Result Gauge Chart canvas not found."); return; }
         if (resultGaugeChart) resultGaugeChart.destroy();
 
         let displayAqi = 0;
-        let categoryInfo = window.getAqiCategoryInfo(-1);
+        let categoryInfo = getAqiCategoryInfo(-1);
         if (aqiValue !== null && aqiValue !== undefined && !isNaN(aqiValue)) {
             displayAqi = parseInt(aqiValue);
-            categoryInfo = window.getAqiCategoryInfo(displayAqi);
+            categoryInfo = getAqiCategoryInfo(displayAqi);
         }
 
         resultGaugeChart = new Chart(gaugeCtx, {
@@ -104,7 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
             data: {
                 datasets: [{
                     data: [displayAqi, Math.max(0, 500 - displayAqi)],
-                    backgroundColor: [categoryInfo.chartColor || '#64748b', 'rgba(255, 255, 255, 0.1)'],
+                    backgroundColor: [categoryInfo.chartColor, 'rgba(255, 255, 255, 0.1)'],
                     borderWidth: 0, cutout: '80%'
                 }]
             },
@@ -118,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (contributionChart) contributionChart.destroy();
 
         const chartData = Object.entries(subindices || {})
-            .filter(([k, v]) => v !== null && v !== undefined && !isNaN(v) && Number(v) > 0)
+            .filter(([k, v]) => v !== null && v !== undefined && v > 0)
             .sort(([, a], [, b]) => b - a);
 
         if (chartData.length === 0) {
@@ -135,7 +157,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         contributionChart = new Chart(contribCtx, {
             type: 'bar',
-            data: { labels: labels, datasets: [{ label: 'Sub-Index Value', data: values, backgroundColor: backgroundColors, borderColor: backgroundColors, borderWidth: 1 }] },
+            data: {
+                labels,
+                datasets: [{ label: 'Sub-Index Value', data: values, backgroundColor: backgroundColors, borderColor: backgroundColors, borderWidth: 1 }]
+            },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false }, title: { display: false } },
@@ -144,63 +169,70 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ------------------------
-    // 5) GEOLOCATION & PRE-FILL
-    // ------------------------
+    // --- Geolocation & fill form with current pollutants ---
     async function fillWithCurrentData() {
         if (!navigator.geolocation) { showToast("Geolocation is not supported by this browser.", true); return; }
-
         if (!useCurrentDataBtn || !geolocateIcon || !geolocateSpinner || !geolocateText) { console.error("Geolocation button elements missing."); return; }
-        useCurrentDataBtn.disabled = true; geolocateIcon.classList.add('hidden');
-        geolocateSpinner.classList.remove('hidden'); geolocateText.textContent = 'Getting Location...';
+
+        useCurrentDataBtn.disabled = true;
+        geolocateIcon.classList.add('hidden');
+        geolocateSpinner.classList.remove('hidden');
+        geolocateText.textContent = 'Getting Location...';
 
         try {
             const position = await new Promise((resolve, reject) => {
                 navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000, enableHighAccuracy: false, maximumAge: 300000 });
             });
-            const lat = position.coords.latitude; const lon = position.coords.longitude;
-            geolocateText.textContent = 'Fetching Pollutants...'; console.log(`Geolocation acquired: ${lat}, ${lon}`);
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+            geolocateText.textContent = 'Fetching Pollutants...';
+            console.log(`Geolocation acquired: ${lat}, ${lon}`);
 
-            const response = await fetch(`/api/current_pollutants?lat=${lat}&lon=${lon}`);
+            // fetch backend current pollutants
+            const response = await fetch(`/api/current_pollutants?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, { method: 'GET' });
             if (!response.ok) {
-                let errorMsg = `Failed to fetch pollutant data: ${response.statusText}`;
-                try { const errorData = await response.json(); if (errorData.error) errorMsg = errorData.error; } catch (e) {}
-                throw new Error(errorMsg);
+                const parsed = await safeParseJsonResponse(response);
+                const msg = parsed.error || `Failed to fetch pollutant data: ${response.status} ${response.statusText}`;
+                throw new Error(msg);
             }
-            const data = await response.json();
-            if (data.error) throw new Error(data.error);
+
+            const parsed = await safeParseJsonResponse(response);
+            if (parsed.error) throw new Error(parsed.error);
+
+            const data = parsed.parsed;
+            if (!data) throw new Error("No pollutant data returned.");
 
             console.log("Fetched current pollutant data:", data);
 
             const featuresToFill = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene'];
             let filledCount = 0;
             featuresToFill.forEach(feature => {
-                const input = predictForm.elements[feature];
+                const input = predictForm && predictForm.elements ? predictForm.elements[feature] : null;
                 if (input) {
                     const value = data[feature];
-                    if (value === null || value === undefined || value === '') {
+                    if (value === null || typeof value === 'undefined') {
                         input.value = '';
                     } else {
-                        try {
-                            input.value = Number(value).toFixed(2);
-                            filledCount++;
-                        } catch (e) {
-                            input.value = value;
-                        }
+                        const n = Number(value);
+                        input.value = Number.isFinite(n) ? n.toFixed(2) : String(value);
+                        if (Number.isFinite(n)) filledCount++;
                     }
                     input.style.borderColor = '';
                 }
             });
 
-            if (filledCount > 0) showToast('Form filled with available location data. Some fields may be unavailable.', false);
-            else showToast('Could not fetch pollutant data for your location.', true);
-
-        } catch (error) {
-            console.error("Error getting current data:", error);
-            let userMessage = `Error: ${error.message}`;
-            if (error.code === 1) userMessage = "Geolocation permission denied.";
-            else if (error.code === 2) userMessage = "Could not determine location (position unavailable).";
-            else if (error.code === 3) userMessage = "Geolocation request timed out.";
+            if (filledCount > 0) {
+                showToast('Form filled with available location data. Some fields may be unavailable.', false);
+            } else {
+                showToast('Could not fetch pollutant values to fill the form for your location.', true);
+            }
+        } catch (err) {
+            console.error("Error getting current data:", err);
+            let userMessage = `Error: ${err.message || String(err)}`;
+            // Geolocation API error codes
+            if (err && err.code === 1) userMessage = "Geolocation permission denied.";
+            else if (err && err.code === 2) userMessage = "Could not determine location (position unavailable).";
+            else if (err && err.code === 3) userMessage = "Geolocation request timed out.";
             showToast(userMessage, true);
         } finally {
             useCurrentDataBtn.disabled = false;
@@ -209,18 +241,16 @@ document.addEventListener('DOMContentLoaded', () => {
             geolocateText.textContent = 'Use My Location Data';
         }
     }
+
     if (useCurrentDataBtn) useCurrentDataBtn.addEventListener('click', fillWithCurrentData);
 
-    // ------------------------
-    // 6) PREDICT FORM SUBMISSION (with robust JSON handling)
-    // ------------------------
+    // --- Prediction form submit ---
     if (predictForm && predictBtn && predictionResultArea) {
-
         predictForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             console.log("Predict form submitted.");
 
-            // Basic validation
+            // Validate required numeric inputs (inputs with required attribute)
             let isValid = true;
             const requiredInputs = predictForm.querySelectorAll('input[type="number"][required]');
             requiredInputs.forEach((input) => {
@@ -233,71 +263,68 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (!isValid) { showToast('Please fill all fields with valid numbers.', true); return; }
 
-            // UI loading state
-            predictBtn.disabled = true; if (predictBtnText) predictBtnText.classList.add('hidden');
-            if (predictSpinner) predictSpinner.classList.remove('hidden'); if (predictionResultArea) predictionResultArea.classList.add('hidden');
+            // UI state
+            predictBtn.disabled = true;
+            if (predictBtnText) predictBtnText.classList.add('hidden');
+            if (predictSpinner) predictSpinner.classList.remove('hidden');
+            if (predictionResultArea) predictionResultArea.classList.add('hidden');
 
             try {
-                // Gather form data
-                const formData = new FormData(predictForm); const dataObject = {};
+                const formData = new FormData(predictForm);
                 const features = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'NH3', 'CO', 'SO2', 'O3', 'Benzene', 'Toluene', 'Xylene'];
-                features.forEach(feature => { dataObject[feature] = formData.get(feature); });
+                const payload = {};
+                features.forEach(f => { payload[f] = formData.get(f); });
 
-                // POST to server
+                // Send prediction request to backend
                 const response = await fetch('/api/predict_aqi', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(dataObject)
+                    body: JSON.stringify(payload),
+                    // no-cache helps avoid stale responses during debug
                 });
 
-                // Robust parsing: read text first to handle empty/non-JSON bodies
-                const text = await response.text();
-                let parsed;
-                try {
-                    parsed = text ? JSON.parse(text) : null;
-                } catch (err) {
-                    console.error('Invalid JSON from /api/predict_aqi:', text);
-                    throw new Error(parsed?.error || parsed?.detail || text || `Request failed with status ${response.status}`);
+                if (!response.ok) {
+                    // Parse response (if any) safely to show a useful message
+                    const parsed = await safeParseJsonResponse(response);
+                    const msg = parsed && parsed.parsed && parsed.parsed.error ? parsed.parsed.error : (parsed.error || `Request failed with status ${response.status}`);
+                    throw new Error(msg);
                 }
 
-                if (!response.ok || !parsed || !parsed.success) {
-                    const errMsg = (parsed && (parsed.error || parsed.detail)) || `Request failed with status ${response.status}`;
-                    throw new Error(errMsg);
+                const parsedOK = await safeParseJsonResponse(response);
+                if (parsedOK.error) throw new Error(parsedOK.error);
+                const data = parsedOK.parsed;
+                if (!data || data.success === false) {
+                    const errText = (data && (data.error || data.message)) || 'Prediction failed: unknown server response.';
+                    throw new Error(errText);
                 }
 
-                const data = parsed;
-
-                // Map server category_info to UI-friendly keys (backwards-compatible)
-                const sc = data.category_info || {};
-                const categoryInfo = {
-                    category: sc.category || 'N/A',
-                    description: sc.description || sc.desc || '',
-                    textColor: sc.textColor || (sc.color_class ? extractTextColorFromClass(sc.color_class) : 'text-slate-400'),
-                    borderColor: sc.borderColor || sc.color_class || 'border-slate-500',
-                    bgColor: sc.bgColor || 'bg-slate-500/10',
-                    chartColor: sc.chartColor || '#64748b'
-                };
-
-                // Update result area UI
                 const aqi = data.predicted_aqi;
-                predictionResultText.innerHTML = `<span class="text-2xl font-semibold ${categoryInfo.textColor}">${categoryInfo.category}</span><br><span class="text-sm text-slate-400">${categoryInfo.description}</span>`;
-                predictionResultText.className = `mt-4 text-center p-4 rounded-lg border-t-4 ${categoryInfo.borderColor} ${categoryInfo.bgColor}`;
+                const categoryInfo = data.category_info || getAqiCategoryInfo(aqi);
+                const subindices = data.subindices || {};
 
-                // Draw charts
+                // Update UI summary
+                if (predictionResultText) {
+                    predictionResultText.innerHTML = `<span class="text-2xl font-semibold ${categoryInfo.textColor}">${categoryInfo.category}</span><br><span class="text-sm text-slate-400">${categoryInfo.description}</span>`;
+                    predictionResultText.className = `mt-4 text-center p-4 rounded-lg border-t-4 ${categoryInfo.borderColor} ${categoryInfo.bgColor}`;
+                }
+
                 drawResultGauge(aqi);
-                drawContributionChart(data.subindices || {});
+                drawContributionChart(subindices);
 
-                predictionResultArea.classList.remove('hidden');
-                console.log('Prediction successful:', data);
+                if (predictionResultArea) predictionResultArea.classList.remove('hidden');
+                console.log("Prediction successful:", data);
 
-            } catch (error) {
-                console.error('Prediction submit error:', error);
-                // Show nice error message to user
-                predictionResultText.textContent = `Error: ${error.message || 'Unknown error'}`;
-                predictionResultText.className = 'mt-4 text-center p-4 rounded-lg border-l-4 bg-red-500/20 text-red-300 border-red-500';
-                predictionResultArea.classList.remove('hidden');
-                if (resultGaugeChart) { try { resultGaugeChart.destroy(); } catch (e) {} resultGaugeChart = null; }
-                if (contributionChart) { try { contributionChart.destroy(); } catch (e) {} contributionChart = null; }
+            } catch (err) {
+                console.error("Prediction submit error:", err);
+                const message = err && err.message ? err.message : String(err);
+                if (predictionResultText) {
+                    predictionResultText.textContent = `Error: ${message}`;
+                    predictionResultText.className = 'mt-4 text-center p-4 rounded-lg border-l-4 bg-red-500/20 text-red-300 border-red-500';
+                }
+                if (predictionResultArea) predictionResultArea.classList.remove('hidden');
+                // Destroy charts to avoid stale visuals
+                if (resultGaugeChart) { resultGaugeChart.destroy(); resultGaugeChart = null; }
+                if (contributionChart) { contributionChart.destroy(); contributionChart = null; }
             } finally {
                 predictBtn.disabled = false;
                 if (predictBtnText) predictBtnText.classList.remove('hidden');
@@ -305,20 +332,17 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     } else {
-        console.warn("Could not initialize prediction form listener. Check HTML IDs:", {
+        console.warn("Could not initialize prediction form - missing elements.", {
             predictForm: !!predictForm, predictBtn: !!predictBtn, predictBtnText: !!predictBtnText,
             predictSpinner: !!predictSpinner, predictionResultText: !!predictionResultText, predictionResultArea: !!predictionResultArea
         });
     }
 
-    // ------------------------
-    // 7) Small helpers
-    // ------------------------
-    function extractTextColorFromClass(colorClass) {
-        // colorClass might be something like "bg-red-500/20 text-red-300 border-red-500"
-        if (!colorClass || typeof colorClass !== 'string') return 'text-slate-400';
-        const m = colorClass.match(/text-[-\w]+/);
-        return m ? m[0] : 'text-slate-400';
+    // --- Fallback showToast if not provided by main.js ---
+    if (typeof window.showToast === 'undefined') {
+        window.showToast = (message, isError = false) => {
+            // Lightweight fallback; in production prefer site toast
+            alert(`${isError ? 'Error' : 'Info'}: ${message}`);
+        };
     }
-
-}); // end DOMContentLoaded
+}); // DOMContentLoaded end
