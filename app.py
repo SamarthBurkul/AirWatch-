@@ -65,6 +65,30 @@ def create_app():
             "database": db_type
         })
 
+    # 🔧 TEMPORARY FIX: Database schema reset endpoint
+    @app.route('/admin/reset-database-schema')
+    def reset_database_schema():
+        """Force database schema update. DELETE after use!"""
+        try:
+            db.drop_all()
+            db.create_all()
+            seed_tips(db)
+            
+            from sqlalchemy import inspect
+            inspector = inspect(db.engine)
+            columns = inspector.get_columns('user')
+            password_col = next((c for c in columns if c['name'] == 'password_hash'), None)
+            
+            return jsonify({
+                "success": True,
+                "message": "✅ Database schema reset successfully! You can now signup.",
+                "password_hash_type": str(password_col['type']) if password_col else "not found",
+                "tables": inspector.get_table_names()
+            })
+        except Exception as e:
+            logger.exception("Schema reset failed")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     # 8. Database and Seed Logic
     with app.app_context():
         from models import Tip
@@ -77,7 +101,6 @@ def create_app():
             logger.info("Started background model loader thread.")
 
     return app
-
 def seed_tips(database):
     """Seed the database with CPCB-aligned health tips."""
     from models import Tip
