@@ -51,14 +51,15 @@ def create_app():
     app.register_blueprint(api_bp, url_prefix='/api')  # ✅ FIXED: Now handles /api/* endpoints
 
     # 7. Admin Health Check for Reviewers
-    @app.route('/health')
-    def health():
-        from ml_handler import _loaded_package
-        return jsonify({
-            "status": "online",
-            "ml_model_loaded": _loaded_package is not None,
-            "database": "sqlite:///airwatch.db"
-        })
+    # 7. Admin Health Check for Reviewers
+@app.route('/health')
+def health():
+    from ml_handler import _loaded_package
+    return jsonify({
+        "status": "online",
+        "ml_model_loaded": _loaded_package is not None,
+        "database": app.config['SQLALCHEMY_DATABASE_URI'].split('://')[0]  # Shows 'postgresql' or 'sqlite'
+    })
 
     # 8. Database and Seed Logic
     with app.app_context():
