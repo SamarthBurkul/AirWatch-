@@ -24,6 +24,7 @@ function debounce(func, wait) {
         timeout = setTimeout(later, wait);
     };
 }
+
 function initAutocomplete(inputId, dropdownId, onSelectCallback) {
     const inputElement = document.getElementById(inputId);
     const dropdownElement = document.getElementById(dropdownId);
@@ -42,13 +43,11 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
         }
 
         try {
-            // console.log(`Fetching suggestions for: ${query}`); // Debug log
             const response = await fetch(`/api/autocomplete_city?query=${encodeURIComponent(query)}`);
             if (!response.ok) {
                 throw new Error(`Autocomplete API error: ${response.statusText}`);
             }
             const suggestions = await response.json();
-            // console.log("Suggestions received:", suggestions); // Debug log
 
             dropdownElement.innerHTML = ''; // Clear previous suggestions
             selectedIndex = -1; // Reset keyboard selection
@@ -67,7 +66,8 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
                             onSelectCallback(suggestion); // Call specific page callback
                         }
                     });
-                     // Add mouseover for keyboard sync
+                    
+                    // Add mouseover for keyboard sync
                     item.addEventListener('mouseover', () => {
                         selectedIndex = index;
                         updateSelectionHighlight();
@@ -82,8 +82,10 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
             console.error('Failed to fetch city suggestions:', error);
             dropdownElement.innerHTML = '<div class="autocomplete-item text-red-400">Error fetching suggestions</div>';
             dropdownElement.style.display = 'block'; // Show error briefly
-            // Optionally hide after a delay
-             setTimeout(() => { if (dropdownElement.innerHTML.includes('Error')) dropdownElement.style.display = 'none'; }, 2000);
+            setTimeout(() => { 
+                if (dropdownElement.innerHTML.includes('Error')) 
+                    dropdownElement.style.display = 'none'; 
+            }, 2000);
         }
     };
 
@@ -101,7 +103,7 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
         }
     });
 
-     // Function to update highlight based on selectedIndex
+    // Function to update highlight based on selectedIndex
     const updateSelectionHighlight = () => {
         const items = dropdownElement.querySelectorAll('.autocomplete-item');
         items.forEach((item, index) => {
@@ -118,8 +120,6 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
     inputElement.addEventListener('keydown', (e) => {
         const items = dropdownElement.querySelectorAll('.autocomplete-item');
         if (items.length === 0 || dropdownElement.style.display === 'none') {
-             // If dropdown not visible or empty, allow normal key behavior (like Enter submitting)
-             // unless it's up/down arrow maybe? For now, let Enter work as default.
             return;
         }
 
@@ -132,18 +132,17 @@ function initAutocomplete(inputId, dropdownId, onSelectCallback) {
             selectedIndex = (selectedIndex - 1 + items.length) % items.length;
             updateSelectionHighlight();
         } else if (e.key === 'Enter') {
-             if (selectedIndex > -1) {
+            if (selectedIndex > -1) {
                 e.preventDefault(); // IMPORTANT: Prevent default form submission
                 items[selectedIndex].click(); // Trigger click on selected item
             }
-             // If no item is selected (selectedIndex == -1), allow default Enter behavior
-             // which might trigger the search button's action implicitly if it's the only submit button.
         } else if (e.key === 'Escape') {
             dropdownElement.style.display = 'none'; // Hide on Escape
         }
     });
-
 }
+
+// ✅ FIXED: Form submission handler - Convert FormData to JSON
 document.addEventListener('DOMContentLoaded', () => {
     // Intercept all forms *except* the profile update form
     document.querySelectorAll('form:not([action="/profile"])').forEach(form => {
@@ -161,9 +160,19 @@ document.addEventListener('DOMContentLoaded', () => {
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
 
             try {
+                // ✅ FIXED: Convert FormData to JSON object
+                const formData = new FormData(form);
+                const jsonData = {};
+                formData.forEach((value, key) => {
+                    jsonData[key] = value;
+                });
+
                 const response = await fetch(form.action, {
                     method: form.method,
-                    body: new FormData(form),
+                    headers: {
+                        'Content-Type': 'application/json'  // ✅ CRITICAL: Tell server we're sending JSON
+                    },
+                    body: JSON.stringify(jsonData)  // ✅ FIXED: Send as JSON string
                 });
 
                 const data = await response.json();
