@@ -3,11 +3,7 @@ import logging
 from flask import Blueprint, request, jsonify, current_app, session
 from extensions import db
 from models import Tip, User, Favorite
-from ml_handler import (
-    predict_current_aqi,
-    get_aqi_category,
-    calculate_all_subindices,
-)
+from ml_handler import predict_current_aqi, get_aqi_category, calculate_all_subindices
 # Import utility functions from your existing utils.py
 from .utils import (
     get_coords_from_city,
@@ -577,6 +573,9 @@ def predict_aqi():
 # -----------------------------
 #  AUTOCOMPLETE ENDPOINT
 # -----------------------------
+# -----------------------------
+#  AUTOCOMPLETE ENDPOINT
+# -----------------------------
 @api_bp.route("/autocomplete_city", strict_slashes=False)
 def autocomplete_city():
     """Provide city name suggestions for autocomplete."""
@@ -614,3 +613,72 @@ def autocomplete_city():
     except Exception as e:
         logger.exception("Autocomplete failed")
         return jsonify([]), 200
+
+
+# -----------------------------
+#  MAP ENDPOINTS (MUST BE OUTSIDE autocomplete_city!)
+# -----------------------------
+@api_bp.route('/map_cities_data', methods=['GET'])
+def map_cities_data():
+    """Return initial set of cities to display on map load."""
+    initial_cities = [
+        'Delhi', 'Mumbai', 'Bangalore', 'Kolkata', 'Chennai',
+        'Hyderabad', 'Pune', 'Ahmedabad', 'Jaipur', 'Lucknow'
+    ]
+    
+    cities_data = []
+    
+    for city_name in initial_cities:
+        try:
+            coords = get_coords_from_city(city_name)
+            if 'error' in coords:
+                logger.warning(f"Could not fetch coords for {city_name}")
+                continue
+            
+            aqi_data = fetch_aqi(coords['lat'], coords['lon'], coords['name'])
+            weather_data = fetch_weather(coords['lat'], coords['lon'], coords['name'])
+            
+            city_info = {
+                'city': coords['name'],
+                'country': coords.get('country', 'IN'),
+                'geo': [coords['lat'], coords['lon']],
+                'aqi': aqi_data.get('aqi', 'N/A') if 'error' not in aqi_data else 'N/A',
+                'weather': weather_data if 'error' not in weather_data else None
+            }
+            
+            cities_data.append(city_info)
+            
+        except Exception as e:
+            logger.exception(f"Error fetching data for {city_name}")
+            continue
+    
+    return jsonify(cities_data)
+
+
+@api_bp.route('/city_data/<city_name>', methods=['GET'])
+def city_data(city_name):
+    """Get comprehensive data (AQI + Weather) for a specific city."""
+    if not city_name:
+        return jsonify({'error': 'City name is required'}), 400
+    
+    try:
+        coords = get_coords_from_city(city_name)
+        if 'error' in coords:
+            return jsonify({'error': coords['error']}), 404
+        
+        aqi_data = fetch_aqi(coords['lat'], coords['lon'], coords['name'])
+        weather_data = fetch_weather(coords['lat'], coords['lon'], coords['name'])
+        
+        response_data = {
+            'city': coords['name'],
+            'country': coords.get('country', ''),
+            'geo': [coords['lat'], coords['lon']],
+            'aqi': aqi_data.get('aqi', 'N/A') if 'error' not in aqi_data else 'N/A',
+            'weather': weather_data if 'error' not in weather_data else {'error': weather_data.get('error')}
+        }
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        logger.exception(f"Error fetching city data for {city_name}")
+        return jsonify({'error': f'Failed to fetch data for {city_name}'}), 500

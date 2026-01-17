@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Configuration ---
     const API_KEY = window.OPENWEATHER_API_KEY; // Get API key passed from Flask template
-    const TILE_URL_BASE = `http://maps.openweathermap.org/maps/2.0/weather/`;
+    const TILE_URL_BASE = `https://maps.openweathermap.org/maps/2.0/weather/`; // CHANGED: http → https
     const TILE_ATTRIBUTION = 'Weather Maps © OpenWeatherMap';
 
     // Global variable to track the currently active weather overlay layer
@@ -80,49 +80,49 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Legend Rendering Function (labels on the color segments) ---
-function renderLegend(layerCode) {
-    const legendContainer = document.getElementById('layer-legend');
-    const legendTitle = document.getElementById('legend-title');
-    const legendScale = document.getElementById('legend-scale');
-    
-    if (layerCode === 'none' || !LAYER_LEGENDS[layerCode]) {
-        legendContainer.classList.add('hidden');
-        return;
+    function renderLegend(layerCode) {
+        const legendContainer = document.getElementById('layer-legend');
+        const legendTitle = document.getElementById('legend-title');
+        const legendScale = document.getElementById('legend-scale');
+        
+        if (layerCode === 'none' || !LAYER_LEGENDS[layerCode]) {
+            legendContainer.classList.add('hidden');
+            return;
+        }
+
+        const legend = LAYER_LEGENDS[layerCode];
+        legendTitle.textContent = legend.title;
+        legendScale.innerHTML = ''; // Clear previous content
+
+        // === COLOR BAR WITH LABELS ON TOP ===
+        const colorBar = document.createElement('div');
+        colorBar.className = 'flex w-full h-6 rounded overflow-hidden border border-slate-700 text-[10px] text-white font-medium';
+        colorBar.style.lineHeight = '1.2';
+        colorBar.style.textShadow = '0 0 3px rgba(0, 0, 0, 0.8)'; // makes text readable over bright colors
+
+        legend.colors.forEach((color, index) => {
+            const segment = document.createElement('div');
+            segment.style.backgroundColor = color;
+            segment.style.flex = '1';
+            segment.style.height = '100%';
+            segment.style.display = 'flex';
+            segment.style.alignItems = 'center';
+            segment.style.justifyContent = 'center';
+            segment.style.padding = '0 2px';
+            segment.style.boxSizing = 'border-box';
+
+            const label = document.createElement('span');
+            label.textContent = legend.values[index] || '';
+            label.style.whiteSpace = 'nowrap';
+            label.style.textAlign = 'center';
+            segment.appendChild(label);
+
+            colorBar.appendChild(segment);
+        });
+
+        legendScale.appendChild(colorBar);
+        legendContainer.classList.remove('hidden');
     }
-
-    const legend = LAYER_LEGENDS[layerCode];
-    legendTitle.textContent = legend.title;
-    legendScale.innerHTML = ''; // Clear previous content
-
-    // === COLOR BAR WITH LABELS ON TOP ===
-    const colorBar = document.createElement('div');
-    colorBar.className = 'flex w-full h-6 rounded overflow-hidden border border-slate-700 text-[10px] text-white font-medium';
-    colorBar.style.lineHeight = '1.2';
-    colorBar.style.textShadow = '0 0 3px rgba(0, 0, 0, 0.8)'; // makes text readable over bright colors
-
-    legend.colors.forEach((color, index) => {
-        const segment = document.createElement('div');
-        segment.style.backgroundColor = color;
-        segment.style.flex = '1';
-        segment.style.height = '100%';
-        segment.style.display = 'flex';
-        segment.style.alignItems = 'center';
-        segment.style.justifyContent = 'center';
-        segment.style.padding = '0 2px';
-        segment.style.boxSizing = 'border-box';
-
-        const label = document.createElement('span');
-        label.textContent = legend.values[index] || '';
-        label.style.whiteSpace = 'nowrap';
-        label.style.textAlign = 'center';
-        segment.appendChild(label);
-
-        colorBar.appendChild(segment);
-    });
-
-    legendScale.appendChild(colorBar);
-    legendContainer.classList.remove('hidden');
-}
 
     // --- Weather Layer Toggle Logic ---
     const layerSelect = document.getElementById('weatherLayerSelect');
@@ -226,14 +226,25 @@ function renderLegend(layerCode) {
     async function loadInitialCities() {
         try {
             const response = await fetch('/api/map_cities_data');
-            if (!response.ok) throw new Error(`Failed to fetch initial map data: ${response.statusText}`);
+            if (!response.ok) {
+                // If endpoint doesn't exist, silently skip initial load
+                if (response.status === 404) {
+                    console.warn('Initial cities endpoint not found. Skipping.');
+                    return;
+                }
+                throw new Error(`Failed to fetch initial map data: ${response.statusText}`);
+            }
             const cities = await response.json();
             if (Array.isArray(cities) && cities.length > 0) {
                  cities.forEach(addCityMarker);
             }
         } catch (error) {
             console.error('Error in loadInitialCities:', error);
-            if (typeof showToast !== 'undefined') { showToast(error.message || "Could not load initial city data.", true); }
+            // Don't show toast for missing endpoint
+            if (error.message.includes('404')) return;
+            if (typeof showToast !== 'undefined') { 
+                showToast(error.message || "Could not load initial city data.", true); 
+            }
         }
     }
 
@@ -249,26 +260,42 @@ function renderLegend(layerCode) {
 
         try {
             const response = await fetch(`/api/city_data/${encodeURIComponent(cityName)}`);
+            
+            // Check if response is JSON
+            const contentType = response.headers.get("content-type");
+            if (!contentType || !contentType.includes("application/json")) {
+                throw new Error(`Server returned non-JSON response for "${cityName}"`);
+            }
+            
             const cityData = await response.json();
 
-            if (!response.ok || cityData.error) throw new Error(cityData.error || `Data fetch failed: ${response.statusText}`);
+            if (!response.ok || cityData.error) {
+                throw new Error(cityData.error || `Data fetch failed: ${response.statusText}`);
+            }
             
             addCityMarker(cityData); 
             if (cityData.geo) map.flyTo(cityData.geo, 10);
 
         } catch (error) {
             console.error("Error during performSearch:", error);
-            if (typeof showToast !== 'undefined') { showToast(error.message || `Could not find data for "${cityName}".`, true); }
+            if (typeof showToast !== 'undefined') { 
+                showToast(error.message || `Could not find data for "${cityName}".`, true); 
+            }
 
             // Fallback: Try to fly to location using Geocoding API
             try {
                  if (!API_KEY) return;
-                 const geoResponse = await fetch(`http://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(cityName)}&limit=1&appid=${API_KEY}`);
+                 // CHANGED: http → https
+                 const geoResponse = await fetch(`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(cityName)}&limit=1&appid=${API_KEY}`);
                  if (geoResponse.ok) {
                      const geoData = await geoResponse.json();
-                     if (geoData && geoData.length > 0) map.flyTo([geoData[0].lat, geoData[0].lon], 10);
+                     if (geoData && geoData.length > 0) {
+                         map.flyTo([geoData[0].lat, geoData[0].lon], 10);
+                     }
                  }
-            } catch (geoError) { console.error("Geocoding fallback failed:", geoError); }
+            } catch (geoError) { 
+                console.error("Geocoding fallback failed:", geoError); 
+            }
         } finally {
              searchInput.disabled = false;
              if (searchButton) searchButton.innerHTML = '<i class="fas fa-search"></i>';

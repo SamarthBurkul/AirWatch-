@@ -60,24 +60,49 @@ def calculate_indian_aqi(components):
 # Keep prefix for coords as city name should be unique enough and used directly
 # --- @cache.cached(timeout=3600, key_prefix='coords_%s')
 def get_coords_from_city(city_name):
-    # ... (function code is correct) ...
+    """Get coordinates from city name using OpenWeatherMap Geocoding API."""
     logging.debug(f"Fetching coordinates for city: {city_name}")
     api_key = current_app.config.get('OPENWEATHER_API_KEY')
-    url = current_app.config.get('GEOCODING_API_URL', "http://api.openweathermap.org/geo/1.0/direct")
-    if not api_key: logging.error("OPENWEATHER_API_KEY not configured."); return {'error': 'Server configuration error: API key missing.'}
+    url = current_app.config.get('GEOCODING_API_URL', "https://api.openweathermap.org/geo/1.0/direct")
+    
+    if not api_key:
+        logging.error("OPENWEATHER_API_KEY not configured.")
+        return {'error': 'Server configuration error: API key missing.'}
+    
     params = {'q': city_name, 'limit': 1, 'appid': api_key}
+    
     try:
-        response = requests.get(url, params=params, timeout=5); response.raise_for_status()
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
         data = response.json()
-        if not data: logging.warning(f"Geocoding API returned no results for city: {city_name}"); return {'error': f'City "{city_name}" not found.'}
-        result = {'lat': data[0].get('lat'), 'lon': data[0].get('lon'), 'name': data[0].get('name')}
-        if result['lat'] is None or result['lon'] is None: logging.error(f"Geocoding API response missing lat/lon for {city_name}: {data[0]}"); return {'error': f'Incomplete location data for "{city_name}".'}
-        logging.debug(f"Coordinates found for {city_name}: {result}"); return result
-    except requests.exceptions.Timeout: logging.error(f"Geocoding API request timed out for city: {city_name}"); return {'error': 'Geocoding service timed out.'}
-    except requests.exceptions.RequestException as e: logging.error(f"Geocoding API request error for city {city_name}: {e}"); return {'error': f'Could not connect to geocoding service: {e}'}
-    except Exception as e: logging.exception(f"Unexpected error in get_coords_from_city for {city_name}: {e}"); return {'error': 'An unexpected error occurred during geocoding.'}
-
-
+        
+        if not data:
+            logging.warning(f"Geocoding API returned no results for city: {city_name}")
+            return {'error': f'City "{city_name}" not found.'}
+        
+        result = {
+            'lat': data[0].get('lat'),
+            'lon': data[0].get('lon'),
+            'name': data[0].get('name'),
+            'country': data[0].get('country', '')
+        }
+        
+        if result['lat'] is None or result['lon'] is None:
+            logging.error(f"Geocoding API response missing lat/lon for {city_name}: {data[0]}")
+            return {'error': f'Incomplete location data for "{city_name}".'}
+        
+        logging.debug(f"Coordinates found for {city_name}: {result}")
+        return result
+        
+    except requests.exceptions.Timeout:
+        logging.error(f"Geocoding API request timed out for city: {city_name}")
+        return {'error': 'Geocoding service timed out.'}
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Geocoding API request error for city {city_name}: {e}")
+        return {'error': f'Could not connect to geocoding service: {e}'}
+    except Exception as e:
+        logging.exception(f"Unexpected error in get_coords_from_city for {city_name}: {e}")
+        return {'error': 'An unexpected error occurred during geocoding.'}
 # --- REMOVED key_prefix ---
 # --- @cache.cached(timeout=300) # Let Flask-Caching use args for key
 def fetch_aqi(lat, lon, city_name_display):
@@ -85,7 +110,7 @@ def fetch_aqi(lat, lon, city_name_display):
     logging.debug(f"Fetching AQI for {city_name_display} ({lat}, {lon})")
     # ... (rest of function is correct) ...
     api_key = current_app.config.get('OPENWEATHER_API_KEY')
-    url = "http://api.openweathermap.org/data/2.5/air_pollution"
+    url = "https://api.openweathermap.org/data/2.5/air_pollution"
     if not api_key: logging.error("OPENWEATHER_API_KEY not configured for fetch_aqi."); return {'error': 'Server configuration error: API key missing.'}
     params = {'lat': lat, 'lon': lon, 'appid': api_key}
     try:
@@ -109,7 +134,7 @@ def fetch_weather(lat, lon, city_name_display):
     logging.debug(f"Fetching Weather for {city_name_display} ({lat}, {lon})")
     # ... (rest of function is correct) ...
     api_key = current_app.config.get('OPENWEATHER_API_KEY')
-    url = "http://api.openweathermap.org/data/2.5/weather"
+    url = "https://api.openweathermap.org/data/2.5/weather"
     if not api_key: logging.error("OPENWEATHER_API_KEY not configured for fetch_weather."); return {'error': 'Server configuration error: API key missing.'}
     params = {'lat': lat, 'lon': lon, 'appid': api_key, 'units': 'metric'}
     try:
@@ -193,7 +218,7 @@ def _process_daily_forecast(forecast_list):
 def fetch_forecast(lat, lon):
     logging.debug(f"Fetching Weather Forecast ({lat}, {lon})")
     api_key = current_app.config.get('OPENWEATHER_API_KEY')
-    url = "http://api.openweathermap.org/data/2.5/forecast"
+    url = "https://api.openweathermap.org/data/2.5/forecast"
     if not api_key: logging.error("OPENWEATHER_API_KEY not configured for fetch_forecast."); return [], [] # Return two empty lists
     params = {'lat': lat, 'lon': lon, 'appid': api_key, 'units': 'metric'}
     try:
@@ -213,7 +238,7 @@ def fetch_forecast(lat, lon):
 def fetch_historical_aqi(lat, lon):
     logging.debug(f"Fetching Historical AQI ({lat}, {lon})")
     api_key = current_app.config.get('OPENWEATHER_API_KEY')
-    url = "http://api.openweathermap.org/data/2.5/air_pollution/history"
+    url = "https://api.openweathermap.org/data/2.5/air_pollution/history"
     if not api_key: logging.error("OPENWEATHER_API_KEY not configured..."); logging.warning(f"Simulating historical AQI..."); return _simulate_historical_if_needed([])
     end_time_dt = datetime.now(timezone.utc); start_time_dt = end_time_dt - timedelta(hours=24)
     end_time = int(end_time_dt.timestamp()); start_time = int(start_time_dt.timestamp())

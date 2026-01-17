@@ -27,7 +27,8 @@ class Config:
     
     # OpenWeather API
     OPENWEATHER_API_KEY = os.environ.get('OPENWEATHER_API_KEY', '')
-    GEOCODING_API_URL = "http://api.openweathermap.org/geo/1.0/direct"
+    # ✅ CHANGED: http → https
+    GEOCODING_API_URL = "https://api.openweathermap.org/geo/1.0/direct"
     
     # Flask-Caching
     CACHE_TYPE = 'SimpleCache'
