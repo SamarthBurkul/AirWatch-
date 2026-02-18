@@ -41,20 +41,42 @@ Built as a capstone project aligned with **SDG 13 (Climate Action)**.
 
 ## 🏗️ Architecture
 
-```
-┌───────────────────────┐     ┌─────────────────────┐
-│   Frontend (Static)   │────▶│   Flask Backend      │
-│  Chart.js + Leaflet   │     │   18+ REST Endpoints │
-│  Jinja2 Templates     │     │                      │
-└───────────────────────┘     └─────────┬───────────┘
-                                        │
-                    ┌──────────┬────────┼─────────┐
-                    │          │        │         │
-             ┌──────────┐ ┌────────┐ ┌───────┐ ┌──────────┐
-             │ ML Model │ │ DB     │ │ Cache │ │ External │
-             │ (joblib) │ │ PG/SQL │ │       │ │ APIs     │
-             │ RF Model │ │ ite    │ │       │ │ OpenWx   │
-             └──────────┘ └────────┘ └───────┘ └──────────┘
+```mermaid
+graph TD
+    subgraph Frontend["🖥️ Frontend (Static)"]
+        UI["Chart.js + Leaflet + Jinja2 Templates"]
+    end
+
+    subgraph Backend["⚙️ Flask Backend (18+ REST Endpoints)"]
+        API["routes/api.py"]
+        AUTH["routes/auth.py"]
+        MAIN["routes/main.py"]
+        UTILS["routes/utils.py"]
+    end
+
+    subgraph ML["🤖 ML Pipeline"]
+        MODEL["RandomForest Model (joblib)"]
+        HANDLER["ml_handler.py"]
+    end
+
+    subgraph Storage["💾 Data Layer"]
+        PG["PostgreSQL (prod)"]
+        SQLite["SQLite (dev)"]
+        CACHE["Flask-Cache"]
+    end
+
+    subgraph External["🌐 External APIs"]
+        OW["OpenWeather API"]
+    end
+
+    Frontend -->|HTTP Requests| Backend
+    API --> HANDLER
+    HANDLER --> MODEL
+    API --> UTILS
+    UTILS --> OW
+    Backend --> PG
+    Backend --> SQLite
+    Backend --> CACHE
 ```
 
 ---
